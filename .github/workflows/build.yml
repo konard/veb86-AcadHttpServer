@@ -1,0 +1,79 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build DLL + tests (Windows, net48 / net8.0)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build (Release, x64)
+        run: dotnet build AutoCADHttp.sln -c Release
+
+      - name: Test (.NET Framework 4.8 and .NET 8)
+        run: dotnet test AutoCADHttp.sln -c Release --no-build --logger "console;verbosity=normal"
+        timeout-minutes: 5
+
+      - name: Check DLL
+        shell: powershell # Windows PowerShell (.NET Framework) reports ProcessorArchitecture correctly
+        run: |
+          $dll = "src/AutoCADHttp/bin/Release/AutoCADHttp.dll"
+          if (!(Test-Path $dll)) { throw "$dll not found" }
+          $asm = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path $dll))
+          Write-Host "Assembly: $($asm.FullName), architecture: $($asm.ProcessorArchitecture)"
+          if ($asm.ProcessorArchitecture -ne 'Amd64') { throw "Expected x64 (Amd64) assembly" }
+          if (Test-Path "src/AutoCADHttp/bin/Release/acmgd.dll") { throw "AutoCAD DLLs must not be copied to the output" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item src/AutoCADHttp/bin/Release/AutoCADHttp.dll artifacts/
+          Copy-Item src/AutoCADHttp/bin/Release/AutoCADHttp.pdb artifacts/
+          Copy-Item README.md artifacts/
+          Copy-Item examples/check-ping.ps1 artifacts/
+          Compress-Archive -Path artifacts/* -DestinationPath AutoCADHttp-AutoCAD2021-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoCADHttp-AutoCAD2021-x64
+          path: artifacts/
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AutoCADHttp-AutoCAD2021-x64.zip
+
+  linux:
+    name: Tests (Linux, net8.0) + DLL build check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build AutoCADHttp.sln -c Release
+
+      - name: Test
+        run: dotnet test AutoCADHttp.sln -c Release --no-build --logger "console;verbosity=normal"
+        timeout-minutes: 5

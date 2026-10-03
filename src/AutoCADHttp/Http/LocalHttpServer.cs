@@ -137,12 +137,10 @@ namespace AutoCADHttp.Http
                 if (_session != null)
                     return StartResult.AlreadyRunning;
 
+                // ExclusiveAddressUse is intentionally not set: on Windows SO_EXCLUSIVEADDRUSE prevents
+                // re-binding the port while server-closed connections are in TIME_WAIT,
+                // which would break HTTPSTOP followed by HTTPSTART.
                 var listener = new TcpListener(IPAddress.Loopback, _requestedPort);
-                if (Environment.OSVersion.Platform == PlatformID.Win32NT)
-                {
-                    // Do not let another process bind the same address/port with SO_REUSEADDR.
-                    listener.ExclusiveAddressUse = true;
-                }
 
                 try
                 {
@@ -182,10 +180,11 @@ namespace AutoCADHttp.Http
                 if (session == null)
                     return false;
                 _session = null;
-            }
 
-            session.Stopping = true;
-            try { session.Listener.Stop(); } catch (Exception ex) { Trace("Listener stop: " + ex.Message); }
+                // Release the port inside the lock so that a following Start() can bind it again.
+                session.Stopping = true;
+                try { session.Listener.Stop(); } catch (Exception ex) { Trace("Listener stop: " + ex.Message); }
+            }
 
             foreach (var client in session.Clients.Keys)
                 CloseQuietly(client);
@@ -235,6 +234,12 @@ namespace AutoCADHttp.Http
                 }
 
                 session.Clients.TryAdd(client, 0);
+                if (session.Stopping)
+                {
+                    // Stop() may have enumerated the clients before this one was added.
+                    CloseQuietly(client);
+                    break;
+                }
                 // Fire and forget: HandleClientAsync never throws.
                 Task.Run(() => HandleClientAsync(session, client));
             }

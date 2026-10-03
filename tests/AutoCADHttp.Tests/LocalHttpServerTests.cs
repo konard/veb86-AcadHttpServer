@@ -242,12 +242,10 @@ namespace AutoCADHttp.Tests
         public void CanRestartOnSamePortAfterStop()
         {
             int port;
-            using (var probe = new TcpListener(IPAddress.Loopback, 0))
-            {
-                probe.Start();
-                port = ((IPEndPoint)probe.LocalEndpoint).Port;
-                probe.Stop();
-            }
+            var probe = new TcpListener(IPAddress.Loopback, 0); // Not IDisposable on .NET Framework.
+            probe.Start();
+            port = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
 
             using (var server = CreateServer(port))
             {

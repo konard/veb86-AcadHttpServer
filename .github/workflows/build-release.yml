@@ -39,9 +39,9 @@ jobs:
       build_date: ${{ steps.version.outputs.build_date }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: 8.0.x
 
@@ -114,7 +114,7 @@ jobs:
           Write-Host "AutoCADHttp.zip: $($entries -join ', ')"
           if ($entries.Count -ne 1 -or $entries[0] -ne 'AutoCADHttp.dll') { throw "AutoCADHttp.zip must contain only AutoCADHttp.dll" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: AutoCADHttp-${{ steps.version.outputs.tag }}
           path: package/AutoCADHttp.zip
@@ -130,7 +130,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: AutoCADHttp-${{ needs.build.outputs.tag }}
 

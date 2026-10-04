@@ -1,0 +1,180 @@
+# Every push to the default branch (and a manual "Actions → Build & Release → Run workflow"):
+#   checkout → restore NuGet (AutoCAD 2021 API 24.0.0) → build Release / x64 → tests →
+#   AutoCADHttp.dll → AutoCADHttp.zip → GitHub Release v0.0.<N> with the zip as an asset.
+#
+# Version: v$VERSION_PREFIX.<github.run_number> - assigned automatically, nothing to edit before a commit.
+# run_number is unique and increasing for this workflow, so parallel runs can never get the same version;
+# a re-run of a failed run keeps its number. Bump VERSION_PREFIX (e.g. to '0.1') to start a new series.
+#
+# A Release is created only if every build/test/check step succeeded (the release job `needs: build`).
+# Manual runs on a branch other than the default one only build and upload the workflow artifact.
+
+name: Build & Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  VERSION_PREFIX: '0.0'
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  build:
+    name: Build AutoCADHttp.dll (Release / x64, AutoCAD 2021, net48)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      build_date: ${{ steps.version.outputs.build_date }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "$env:VERSION_PREFIX.${{ github.run_number }}"
+          $buildDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+          "version=$version"      >> $env:GITHUB_OUTPUT
+          "tag=v$version"         >> $env:GITHUB_OUTPUT
+          "build_date=$buildDate" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: v$version, commit: $env:GITHUB_SHA, build date: $buildDate"
+
+      # UseInstalledAcad=false: always compile against the official Autodesk NuGet packages
+      # AutoCAD.NET / AutoCAD.NET.Core / AutoCAD.NET.Model 24.0.0, never against a local AutoCAD.
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          dotnet restore AutoCADHttp.sln -p:UseInstalledAcad=false
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error title=NuGet restore failed::Could not restore NuGet packages. The AutoCAD 2021 API packages AutoCAD.NET, AutoCAD.NET.Core, AutoCAD.NET.Model 24.0.0 (https://www.nuget.org/packages/AutoCAD.NET/24.0.0) may be unavailable - see the NU1xxx errors above. No release was created."
+            exit 1
+          }
+          $assets = Get-Content src/AutoCADHttp/obj/project.assets.json -Raw | ConvertFrom-Json
+          $missing = @('AutoCAD.NET', 'AutoCAD.NET.Core', 'AutoCAD.NET.Model') |
+            Where-Object { -not $assets.libraries.PSObject.Properties["$_/24.0.0"] }
+          if ($missing) {
+            Write-Host "::error title=AutoCAD API NuGet packages missing::Not restored: $($missing -join ', ') 24.0.0. No release was created."
+            exit 1
+          }
+          Write-Host "AutoCAD 2021 API NuGet packages restored: AutoCAD.NET, AutoCAD.NET.Core, AutoCAD.NET.Model 24.0.0"
+
+      - name: Build Release / x64
+        run: >
+          dotnet build AutoCADHttp.sln -c Release --no-restore
+          -p:UseInstalledAcad=false
+          -p:Version=${{ steps.version.outputs.version }}
+          -p:SourceRevisionId=${{ github.sha }}
+
+      - name: Test (.NET Framework 4.8 and .NET 8)
+        run: dotnet test AutoCADHttp.sln -c Release --no-build --logger "console;verbosity=normal"
+        timeout-minutes: 5
+
+      - name: Check DLL
+        shell: powershell # Windows PowerShell (.NET Framework) reports ProcessorArchitecture correctly
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "src/AutoCADHttp/bin/Release"
+          $dll = "$out/AutoCADHttp.dll"
+          if (!(Test-Path $dll)) { throw "$dll not found" }
+          $asm = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path $dll))
+          Write-Host "Assembly: $($asm.FullName), architecture: $($asm.ProcessorArchitecture)"
+          if ($asm.ProcessorArchitecture -ne 'Amd64') { throw "Expected x64 (Amd64) assembly" }
+          if ($asm.Version.ToString(3) -ne '${{ steps.version.outputs.version }}') { throw "Expected assembly version ${{ steps.version.outputs.version }}" }
+          # No AutoCAD / Autodesk assemblies (AcMgd.dll, AcDbMgd.dll, AcCoreMgd.dll, AdWindows.dll, ...) in the output
+          $foreign = Get-ChildItem $out -Filter *.dll | Where-Object { $_.Name -ne 'AutoCADHttp.dll' }
+          if ($foreign) { throw "Unexpected DLLs in the output (AutoCAD DLLs must not be shipped): $($foreign.Name -join ', ')" }
+
+      - name: Create AutoCADHttp.zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force package | Out-Null
+          Compress-Archive -Path src/AutoCADHttp/bin/Release/AutoCADHttp.dll -DestinationPath package/AutoCADHttp.zip
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path package/AutoCADHttp.zip))
+          $entries = @($zip.Entries | ForEach-Object FullName)
+          $zip.Dispose()
+          Write-Host "AutoCADHttp.zip: $($entries -join ', ')"
+          if ($entries.Count -ne 1 -or $entries[0] -ne 'AutoCADHttp.dll') { throw "AutoCADHttp.zip must contain only AutoCADHttp.dll" }
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: AutoCADHttp-${{ steps.version.outputs.tag }}
+          path: package/AutoCADHttp.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: AutoCADHttp-${{ needs.build.outputs.tag }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_DATE: ${{ needs.build.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          test -s AutoCADHttp.zip
+
+          # A failed earlier attempt may have left a draft (gh uploads assets to a draft and publishes it last).
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$is_draft" = "true" ]; then
+              echo "Deleting incomplete draft release $TAG left by a previous attempt"
+              gh release delete "$TAG" --yes
+            else
+              echo "::error title=Release already exists::Release $TAG already exists. Start a new run instead of re-running a successful one."
+              exit 1
+            fi
+          fi
+
+          cat > notes.md <<EOF
+          AutoCAD HTTP Server plugin **${TAG}**
+
+          | | |
+          |---|---|
+          | Version | \`${VERSION}\` |
+          | Commit | [\`${GITHUB_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |
+          | Build date | ${BUILD_DATE} |
+          | Configuration | Release / x64 |
+          | Target platform | AutoCAD 2021 / .NET Framework 4.8 |
+          | AutoCAD API | NuGet AutoCAD.NET 24.0.0 (not included) |
+          | Build log | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
+
+          \`AutoCADHttp.zip\` contains only \`AutoCADHttp.dll\`. AutoCAD's own \`AcMgd.dll\`, \`AcDbMgd.dll\`, \`AcCoreMgd.dll\` are not included.
+          Load the DLL in AutoCAD 2021 with \`NETLOAD\`.
+          EOF
+
+          gh release create "$TAG" AutoCADHttp.zip \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file notes.md
+          gh release view "$TAG"

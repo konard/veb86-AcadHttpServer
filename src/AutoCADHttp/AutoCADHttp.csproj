@@ -9,8 +9,11 @@
       2. Otherwise the official Autodesk NuGet packages for AutoCAD 2021
          (AutoCAD.NET / AutoCAD.NET.Core / AutoCAD.NET.Model 24.0.0, "AutoCAD 2021 .Net API") are used.
          This allows building on CI / machines without AutoCAD.
+         Force this mode (e.g. on CI) with:  dotnet build -p:UseInstalledAcad=false
     In both cases the AutoCAD DLLs are NOT copied to the output folder (Private=false / ExcludeAssets=runtime):
     AutoCAD loads its own copies at runtime.
+
+    Version: local builds get 0.0.0; .github/workflows/build-release.yml passes -p:Version=0.0.<N>.
   -->
 
   <PropertyGroup>
@@ -20,7 +23,7 @@
     <OutputType>Library</OutputType>
     <AssemblyName>AutoCADHttp</AssemblyName>
     <RootNamespace>AutoCADHttp</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.0.0</Version>
     <Product>AutoCAD HTTP Server</Product>
     <Description>Local HTTP server (127.0.0.1:5000) running inside AutoCAD 2021</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -54,6 +57,14 @@
   <Target Name="ReportAcadReferences" BeforeTargets="ResolveAssemblyReferences">
     <Message Importance="high" Condition="'$(UseInstalledAcad)' == 'true'" Text="AutoCADHttp: using AutoCAD 2021 assemblies from '$(AcadDir)'" />
     <Message Importance="high" Condition="'$(UseInstalledAcad)' != 'true'" Text="AutoCADHttp: AutoCAD 2021 not found in '$(AcadDir)', using NuGet AutoCAD.NET 24.0.0 reference assemblies" />
+  </Target>
+
+  <!-- Fail with a clear message instead of a pile of CS0246 errors if the AutoCAD API assemblies were not resolved. -->
+  <Target Name="CheckAcadReferences" AfterTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <_AcadApiReference Include="@(ReferencePath->'%(Filename)')" Condition="'%(Filename)' == 'AcMgd' Or '%(Filename)' == 'AcDbMgd' Or '%(Filename)' == 'AcCoreMgd'" />
+    </ItemGroup>
+    <Error Condition="'@(_AcadApiReference->Distinct()->Count())' != '3'" Text="AutoCADHttp: AutoCAD 2021 API assemblies (AcMgd.dll, AcDbMgd.dll, AcCoreMgd.dll) were not resolved (found: '@(_AcadApiReference)'). Install AutoCAD 2021 into '$(AcadDir)' or make sure the NuGet packages AutoCAD.NET / AutoCAD.NET.Core / AutoCAD.NET.Model 24.0.0 can be restored from nuget.org." />
   </Target>
 
 </Project>

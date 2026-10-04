@@ -13,7 +13,7 @@ name: Build & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, issue-3-06dce7bb59f4] # TEMP: fork test
   workflow_dispatch:
 
 permissions:
@@ -124,7 +124,7 @@ jobs:
   release:
     name: GitHub Release ${{ needs.build.outputs.tag }}
     needs: build
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || github.ref == 'refs/heads/issue-3-06dce7bb59f4' # TEMP: fork test
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

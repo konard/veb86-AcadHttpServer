@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -27,6 +28,29 @@ namespace AutoCADHttp.Tests
         private static HttpClient CreateClient()
         {
             return new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        }
+
+        /// <summary>
+        /// Cross-process lock for tests that bind the real port 5000. `dotnet test` runs the net48 and net8.0
+        /// test assemblies in parallel processes; without the lock one process can stop its server while the other
+        /// starts one on the same port, and the "refused after Stop()" request then reaches the other process.
+        /// A file lock is used because named mutexes are thread-affine (unusable across await).
+        /// </summary>
+        private static IDisposable AcquireRealPortLock()
+        {
+            string path = Path.Combine(Path.GetTempPath(), "AutoCADHttp.Tests.port" + LocalHttpServer.DefaultPort + ".lock");
+            var stopwatch = Stopwatch.StartNew();
+            while (true)
+            {
+                try
+                {
+                    return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (IOException) when (stopwatch.Elapsed < TimeSpan.FromSeconds(60))
+                {
+                    Thread.Sleep(50);
+                }
+            }
         }
 
         /// <summary>Sends raw bytes and returns the whole response (the server always closes the connection).</summary>
@@ -442,6 +466,7 @@ namespace AutoCADHttp.Tests
         public async Task RealPort5000_PingWorksAndIsRefusedAfterStop()
         {
             // End-to-end check of the exact configuration used inside AutoCAD.
+            using (AcquireRealPortLock())
             using (var server = CreateServer(LocalHttpServer.DefaultPort))
             using (var http = CreateClient())
             {

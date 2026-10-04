@@ -313,12 +313,34 @@ dotnet test  AutoCADHttp.sln -c Release
 
 Результат: `src\AutoCADHttp\bin\Release\AutoCADHttp.dll`.
 
-### Готовая DLL
+### Готовая DLL (GitHub Releases)
 
-GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) на Windows собирает DLL, запускает тесты
-на .NET Framework 4.8 и .NET 8 и публикует артефакт **AutoCADHttp-AutoCAD2021-x64** (`AutoCADHttp.dll`, `.pdb`,
-README, скрипт проверки) — его можно скачать на странице запуска workflow во вкладке *Actions*.
-При создании тега `v*` архив прикладывается к GitHub Release.
+После каждого `push` в основную ветку GitHub Actions
+([`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)) автоматически:
+
+```text
+Checkout → Restore NuGet (AutoCAD.NET 24.0.0) → Build Release / x64 → тесты → AutoCADHttp.dll
+         → AutoCADHttp.zip → GitHub Release vX.Y.N (AutoCADHttp.zip в Assets)
+```
+
+* Версия формируется автоматически: `v0.0.<номер запуска workflow>` (`v0.0.1`, `v0.0.2`, …); менять версию
+  перед commit не нужно. Та же версия записывается в `AutoCADHttp.dll` (`AssemblyVersion`/`FileVersion`),
+  commit SHA — в `InformationalVersion`. Номер запуска уникален, поэтому два одновременных запуска не получат
+  одну версию; номера неудачных сборок пропускаются. Новую серию (например, `v0.1.N`) можно начать, изменив
+  `VERSION_PREFIX` в workflow.
+* `AutoCADHttp.zip` содержит только `AutoCADHttp.dll` — `AcMgd.dll`, `AcDbMgd.dll`, `AcCoreMgd.dll` и другие
+  DLL Autodesk не включаются (workflow проверяет это и завершается ошибкой, если в выходной папке есть лишние DLL).
+* В описании Release: версия, commit SHA, дата сборки, конфигурация `Release / x64`,
+  платформа `AutoCAD 2021 / .NET Framework 4.8`.
+* AutoCAD API берётся только из NuGet (`-p:UseInstalledAcad=false`). Если пакеты недоступны, шаг
+  *Restore NuGet packages* завершается ошибкой с понятным сообщением.
+* Если сборка, тесты или проверки не прошли — Release не создаётся, ошибка видна во вкладке *Actions*.
+  Ассеты загружаются в черновик Release, который публикуется последним шагом, поэтому неполный Release не появляется.
+* Запуск вручную: *Actions → Build & Release → Run workflow*. Release создаётся только при запуске из основной
+  ветки; для других веток собирается только артефакт workflow.
+
+Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) проверяет pull request'ы: собирает DLL и
+запускает тесты на Windows (.NET Framework 4.8 и .NET 8) и Linux (.NET 8).
 
 ## Тесты
 
@@ -346,7 +368,7 @@ curl http://127.0.0.1:5000/ping
 
 ## Загрузка в AutoCAD
 
-1. Собрать проект (или скачать готовую DLL из артефакта CI).
+1. Собрать проект (или скачать `AutoCADHttp.zip` из последнего [Release](../../releases/latest) и распаковать).
 2. Запустить AutoCAD 2021.
 3. Выполнить:
 

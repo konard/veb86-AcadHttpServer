@@ -40,6 +40,7 @@ namespace AutoCADHttp.Http
     public sealed class LocalHttpServer : IDisposable
     {
         public const int DefaultPort = 5000;
+        public const int MaxBodyBytes = 1024 * 1024;
         public const int MaxHeaderBytes = 16 * 1024;
         public const int DefaultRequestTimeoutMs = 5000;
 
@@ -281,7 +282,11 @@ namespace AutoCADHttp.Http
                         else if (!IsAllowedHost(request))
                             response = HttpResponseInfo.JsonError(403, "Forbidden", "Host not allowed");
                         else
-                            response = InvokeHandler(request);
+                        {
+                            response = await ReadBodyAsync(stream, request, head.Remainder).ConfigureAwait(false);
+                            if (response == null)
+                                response = InvokeHandler(request);
+                        }
                     }
 
                     byte[] bytes = response.ToBytes(request == null || request.Method != "HEAD");
@@ -341,6 +346,8 @@ namespace AutoCADHttp.Http
             /// <summary>Header block text, or null.</summary>
             public string Text;
 
+            public byte[] Remainder;
+
             /// <summary>Null when the connection was closed before any data, otherwise the reason of failure.</summary>
             public string Error;
         }
@@ -370,10 +377,54 @@ namespace AutoCADHttp.Http
                     if ((i >= 3 && buffer[i - 1] == '\r' && buffer[i - 2] == '\n' && buffer[i - 3] == '\r') ||
                         (i >= 1 && buffer[i - 1] == '\n'))
                     {
-                        return new RequestHead { Text = Encoding.ASCII.GetString(buffer, 0, i + 1) };
+                        var remainder = new byte[total - i - 1];
+                        Buffer.BlockCopy(buffer, i + 1, remainder, 0, remainder.Length);
+                        return new RequestHead { Text = Encoding.ASCII.GetString(buffer, 0, i + 1), Remainder = remainder };
                     }
                 }
             }
+        }
+
+        private static async Task<HttpResponseInfo> ReadBodyAsync(Stream stream, HttpRequestInfo request, byte[] remainder)
+        {
+            if (request.Headers.ContainsKey("Transfer-Encoding"))
+                return HttpResponseInfo.JsonError(400, "Bad Request", "Transfer-Encoding is not supported; use Content-Length");
+            string lengthText;
+            if (!request.Headers.TryGetValue("Content-Length", out lengthText))
+            {
+                if (request.Method == "POST")
+                    return HttpResponseInfo.JsonError(411, "Length Required", "Content-Length required");
+                return null;
+            }
+            long length;
+            if (!long.TryParse(lengthText, NumberStyles.None, CultureInfo.InvariantCulture, out length))
+                return HttpResponseInfo.JsonError(400, "Bad Request", "Invalid Content-Length");
+            if (length > MaxBodyBytes)
+                return HttpResponseInfo.JsonError(413, "Payload Too Large", "Request body too large");
+            string expect;
+            if (length > 0 && request.Headers.TryGetValue("Expect", out expect))
+            {
+                if (!string.Equals(expect, "100-continue", StringComparison.OrdinalIgnoreCase))
+                    return HttpResponseInfo.JsonError(417, "Expectation Failed", "Unsupported expectation");
+                byte[] interim = Encoding.ASCII.GetBytes("HTTP/1.1 100 Continue\r\n\r\n");
+                await stream.WriteAsync(interim, 0, interim.Length).ConfigureAwait(false);
+            }
+            var body = new byte[(int)length];
+            int total = Math.Min(body.Length, remainder.Length);
+            Buffer.BlockCopy(remainder, 0, body, 0, total);
+            while (total < body.Length)
+            {
+                int read = await stream.ReadAsync(body, total, body.Length - total).ConfigureAwait(false);
+                if (read == 0)
+                    return HttpResponseInfo.JsonError(400, "Bad Request", "Incomplete request body");
+                total += read;
+            }
+            try { request.Body = new UTF8Encoding(false, true).GetString(body); }
+            catch (DecoderFallbackException)
+            {
+                return HttpResponseInfo.JsonError(400, "Bad Request", "Request body must be UTF-8");
+            }
+            return null;
         }
 
         internal static HttpRequestInfo ParseRequestHead(string head)
@@ -416,7 +467,10 @@ namespace AutoCADHttp.Http
                 int colon = line.IndexOf(':');
                 if (colon <= 0)
                     return null;
-                headers[line.Substring(0, colon).Trim()] = line.Substring(colon + 1).Trim();
+                string name = line.Substring(0, colon).Trim();
+                if (headers.ContainsKey(name))
+                    return null; // Reject ambiguous framing (especially duplicate Content-Length).
+                headers[name] = line.Substring(colon + 1).Trim();
             }
 
             return new HttpRequestInfo(method, target, protocol, headers);

@@ -4,15 +4,16 @@ using System.Text;
 
 namespace AutoCADHttp.Http
 {
-    /// <summary>Parsed HTTP request (request line and headers only, the body is not used yet).</summary>
+    /// <summary>Parsed HTTP request, including its bounded UTF-8 body.</summary>
     public sealed class HttpRequestInfo
     {
-        public HttpRequestInfo(string method, string target, string protocol, IDictionary<string, string> headers)
+        public HttpRequestInfo(string method, string target, string protocol, IDictionary<string, string> headers, string body = "")
         {
             Method = method;
             Target = target;
             Protocol = protocol;
             Headers = headers;
+            Body = body;
 
             int q = target.IndexOf('?');
             Path = q >= 0 ? target.Substring(0, q) : target;
@@ -29,6 +30,8 @@ namespace AutoCADHttp.Http
 
         /// <summary>Protocol, e.g. "HTTP/1.1".</summary>
         public string Protocol { get; private set; }
+
+        public string Body { get; internal set; }
 
         /// <summary>Headers (case-insensitive names).</summary>
         public IDictionary<string, string> Headers { get; private set; }
@@ -51,6 +54,13 @@ namespace AutoCADHttp.Http
         public string ContentType { get; private set; }
         public string Body { get; private set; }
 
+        public byte[] BodyBytes { get; private set; }
+
+        public static HttpResponseInfo Bytes(int statusCode, string reasonPhrase, string contentType, byte[] body)
+        {
+            return new HttpResponseInfo(statusCode, reasonPhrase, contentType, null) { BodyBytes = body };
+        }
+
         /// <summary>Additional response headers.</summary>
         public IDictionary<string, string> Headers { get; private set; }
 
@@ -68,7 +78,7 @@ namespace AutoCADHttp.Http
         /// <summary>Serializes the response as an HTTP/1.1 message with "Connection: close".</summary>
         public byte[] ToBytes(bool includeBody)
         {
-            byte[] body = Encoding.UTF8.GetBytes(Body);
+            byte[] body = BodyBytes ?? Encoding.UTF8.GetBytes(Body);
 
             var sb = new StringBuilder();
             sb.Append("HTTP/1.1 ").Append(StatusCode).Append(' ').Append(ReasonPhrase).Append("\r\n");

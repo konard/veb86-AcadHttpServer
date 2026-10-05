@@ -67,4 +67,8 @@
     <Error Condition="'@(_AcadApiReference->Distinct()->Count())' != '3'" Text="AutoCADHttp: AutoCAD 2021 API assemblies (AcMgd.dll, AcDbMgd.dll, AcCoreMgd.dll) were not resolved (found: '@(_AcadApiReference)'). Install AutoCAD 2021 into '$(AcadDir)' or make sure the NuGet packages AutoCAD.NET / AutoCAD.NET.Core / AutoCAD.NET.Model 24.0.0 can be restored from nuget.org." />
   </Target>
 
+  <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
 </Project>

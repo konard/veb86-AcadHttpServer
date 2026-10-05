@@ -1,8 +1,10 @@
 using System;
 using System.Globalization;
+using System.Threading;
 using System.Net.Sockets;
 using Autodesk.AutoCAD.Runtime;
 using AutoCADHttp.Http;
+using Application = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 [assembly: ExtensionApplication(typeof(AutoCADHttp.HttpServerPlugin))]
 [assembly: CommandClass(typeof(AutoCADHttp.HttpServerPlugin))]
@@ -18,10 +20,29 @@ namespace AutoCADHttp
         public const string AppName = "AutoCAD";
         public const string ApplicationVersion = "2021";
 
+        private static readonly ApiRouter Router = CreateRouter();
+        private static readonly IpcDispatcher CommandDispatcher = CreateDispatcher();
+        private static IpcOutbox _outbox;
+
+        /// <summary>Register application handlers / subscribe to responses and events on the AutoCAD main thread.</summary>
+        public static IpcDispatcher Dispatcher { get { return CommandDispatcher; } }
+
+        /// <summary>Queue an application command, response or event without waiting for HTTP.</summary>
+        public static bool QueueOutgoing(IpcMessage message)
+        {
+            if (message == null)
+                throw new ArgumentNullException("message");
+            var outbox = Volatile.Read(ref _outbox);
+            if (outbox != null)
+                return outbox.TryEnqueue(message);
+            CommandLineLog.Post("IPC outgoing " + message.Id + " unavailable: start the server with ACADHTTP_EXTERNAL_IPC configured.");
+            return false;
+        }
+
         // One server per AutoCAD process (shared by all open drawings).
         private static readonly LocalHttpServer Server = new LocalHttpServer(
             LocalHttpServer.DefaultPort,
-            new ApiRouter(AppName, ApplicationVersion).Handle,
+            Router.Handle,
             CommandLineLog.Post)
         {
             // Set the environment variable ACADHTTP_VERBOSE=1 before starting AutoCAD
@@ -32,13 +53,16 @@ namespace AutoCADHttp
         public void Initialize()
         {
             CommandLineLog.Attach();
+            Application.Idle += OnIdle;
             CommandLineLog.Write("AutoCADHttp loaded. Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.");
         }
 
         public void Terminate()
         {
             // AutoCAD is shutting down: release the port, do not touch the editor.
+            try { Application.Idle -= OnIdle; } catch { }
             try { Server.Stop(); } catch { }
+            try { StopOutbox(); } catch { }
             try { CommandLineLog.Detach(); } catch { }
         }
 
@@ -54,6 +78,8 @@ namespace AutoCADHttp
                     return;
                 }
 
+                StartOutbox();
+                CommandLineLog.Write("IPC: " + BaseUrl() + "ipc; widgets: " + BaseUrl() + "widgets/");
                 CommandLineLog.Write("Server started: " + BaseUrl() + " (test: " + BaseUrl() + "ping)");
             }
             catch (SocketException ex)
@@ -77,6 +103,7 @@ namespace AutoCADHttp
         {
             try
             {
+                StopOutbox();
                 if (Server.Stop())
                     CommandLineLog.Write("Server stopped. Port " + Server.Port + " released.");
                 else
@@ -107,6 +134,9 @@ namespace AutoCADHttp
                     CommandLineLog.Write("URL: " + BaseUrl() + "ping");
                 }
 
+                CommandLineLog.Write("Incoming IPC queued: " + Router.Incoming.Count);
+                var outbox = Volatile.Read(ref _outbox);
+                CommandLineLog.Write("Outgoing IPC: " + (outbox == null ? "DISABLED" : "RUNNING (queued: " + outbox.PendingCount + ")"));
                 CommandLineLog.Write("Requests served: " + Server.RequestCount.ToString(CultureInfo.InvariantCulture));
                 if (!string.IsNullOrEmpty(Server.LastError))
                     CommandLineLog.Write("Last error: " + Server.LastError);
@@ -115,6 +145,60 @@ namespace AutoCADHttp
             {
                 CommandLineLog.Write("ERROR: cannot get server status: " + ex.GetType().Name + ": " + ex.Message);
             }
+        }
+
+        private static ApiRouter CreateRouter()
+        {
+            try
+            {
+                return new ApiRouter(AppName, ApplicationVersion,
+                    widgetsDirectory: Environment.GetEnvironmentVariable("ACADHTTP_WIDGETS_DIR"));
+            }
+            catch (System.Exception ex)
+            {
+                CommandLineLog.Post("ERROR: invalid ACADHTTP_WIDGETS_DIR: " + ex.Message);
+                return new ApiRouter(AppName, ApplicationVersion);
+            }
+        }
+
+        private static IpcDispatcher CreateDispatcher()
+        {
+            var dispatcher = new IpcDispatcher(Router.Incoming, m => QueueOutgoing(m), CommandLineLog.Post);
+            // A transport demonstration only. Future drawing handlers belong in the application layer.
+            dispatcher.Register("PING", m => IpcMessage.CreateResponse(m.Id));
+            return dispatcher;
+        }
+
+        private static void OnIdle(object sender, EventArgs e)
+        {
+            if (Server.IsRunning)
+                CommandDispatcher.Drain();
+        }
+
+        private static void StartOutbox()
+        {
+            string endpoint = Environment.GetEnvironmentVariable("ACADHTTP_EXTERNAL_IPC");
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                CommandLineLog.Write("IPC outgoing disabled: set ACADHTTP_EXTERNAL_IPC to the external /ipc URL.");
+                return;
+            }
+            try
+            {
+                Volatile.Write(ref _outbox, new IpcOutbox(new Uri(endpoint), CommandLineLog.Post) { Verbose = Server.Verbose });
+            }
+            catch (System.Exception ex)
+            {
+                // Misconfigured/unavailable external transport must never disable the incoming HTTP server.
+                CommandLineLog.Write("ERROR: cannot configure outgoing IPC: " + ex.Message);
+            }
+        }
+
+        private static void StopOutbox()
+        {
+            var outbox = Interlocked.Exchange(ref _outbox, null);
+            if (outbox != null)
+                outbox.Dispose();
         }
 
         private static string BaseUrl()

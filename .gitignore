@@ -6,3 +6,5 @@ obj/
 TestResults/
 artifacts/
 ci-logs/
+__pycache__/
+*.pyc

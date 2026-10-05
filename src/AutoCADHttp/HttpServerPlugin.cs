@@ -1,10 +1,10 @@
 using System;
 using System.Globalization;
 using System.Threading;
-using Application = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 using System.Net.Sockets;
 using Autodesk.AutoCAD.Runtime;
 using AutoCADHttp.Http;
+using Application = Autodesk.AutoCAD.ApplicationServices.Core.Application;
 
 [assembly: ExtensionApplication(typeof(AutoCADHttp.HttpServerPlugin))]
 [assembly: CommandClass(typeof(AutoCADHttp.HttpServerPlugin))]
@@ -30,10 +30,12 @@ namespace AutoCADHttp
         /// <summary>Queue an application command, response or event without waiting for HTTP.</summary>
         public static bool QueueOutgoing(IpcMessage message)
         {
+            if (message == null)
+                throw new ArgumentNullException("message");
             var outbox = Volatile.Read(ref _outbox);
             if (outbox != null)
                 return outbox.TryEnqueue(message);
-            CommandLineLog.Post("IPC outgoing unavailable: start the server with ACADHTTP_EXTERNAL_IPC configured.");
+            CommandLineLog.Post("IPC outgoing " + message.Id + " unavailable: start the server with ACADHTTP_EXTERNAL_IPC configured.");
             return false;
         }
 
@@ -183,7 +185,7 @@ namespace AutoCADHttp
             }
             try
             {
-                _outbox = new IpcOutbox(new Uri(endpoint), CommandLineLog.Post) { Verbose = Server.Verbose };
+                Volatile.Write(ref _outbox, new IpcOutbox(new Uri(endpoint), CommandLineLog.Post) { Verbose = Server.Verbose });
             }
             catch (System.Exception ex)
             {

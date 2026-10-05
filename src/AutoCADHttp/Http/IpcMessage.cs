@@ -1,4 +1,5 @@
 using System;
+
 namespace AutoCADHttp.Http
 {
     /// <summary>Immutable envelope. Application payloads stay JSON; transport does not interpret commands.</summary>

@@ -60,7 +60,7 @@ namespace AutoCADHttp.Http
                     return HttpResponseInfo.Json(400, "Bad Request", IpcMessage.ErrorJson(null, "INVALID_JSON"));
                 }
                 Incoming.Enqueue(message);
-                return HttpResponseInfo.Json(202, "Accepted", "{\"id\":" + IpcMessage.Quote(message.Id) + ",\"status\":\"accepted\"}");
+                return HttpResponseInfo.Json(202, "Accepted", IpcMessage.CreateResponse(message.Id, "{\"queued\":true}").Json);
             }
 
             if (request.Path == "/widgets" || request.Path.StartsWith("/widgets/", StringComparison.Ordinal))

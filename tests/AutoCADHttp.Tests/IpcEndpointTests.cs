@@ -27,9 +27,13 @@ namespace AutoCADHttp.Tests
                     Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
                     string body = await response.Content.ReadAsStringAsync();
                     Assert.Contains("\"id\":\"123\"", body);
+                    var acknowledgement = IpcMessage.Parse(body);
+                    Assert.Equal("response", acknowledgement.Type);
+                    Assert.Equal("{\"queued\":true}", acknowledgement.ResultJson);
                 }
             }
         }
+
         [Theory]
         [InlineData("command")]
         [InlineData("response")]
@@ -116,6 +120,52 @@ namespace AutoCADHttp.Tests
                 }));
                 Assert.Equal(50, router.Incoming.Count);
                 Assert.Equal(50, router.Incoming.Select(m => m.Id).Distinct().Count());
+            }
+        }
+
+        [Fact]
+        public async Task ExpectContinue_IsAnswered_AndCommandIsAccepted()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                using (var request = new HttpRequestMessage(HttpMethod.Post, "http://127.0.0.1:" + server.Port + "/ipc"))
+                {
+                    request.Headers.ExpectContinue = true;
+                    request.Content = new StringContent(IpcMessage.CreateCommand("continue", "PING").Json, Encoding.UTF8, "application/json");
+                    using (var response = await http.SendAsync(request))
+                        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+                }
+                Assert.Equal("continue", router.Incoming.Single().Id);
+            }
+        }
+
+        [Theory]
+        [InlineData("text/html")]
+        [InlineData("text/plain")]
+        [InlineData("")]
+        public void NonJsonContentType_IsRejected(string contentType)
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var headers = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", contentType } };
+            var response = router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", headers, IpcMessage.CreateCommand("1", "PING").Json));
+            Assert.Equal(415, response.StatusCode);
+            Assert.Empty(router.Incoming);
+        }
+
+        [Fact]
+        public async Task InvalidUtf8_IsRejectedBeforeEnqueue()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            {
+                server.Start();
+                byte[] header = Encoding.ASCII.GetBytes("POST /ipc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n");
+                string raw = await HttpTestHelpers.SendRaw(server.Port, header.Concat(new byte[] { 255 }).ToArray());
+                Assert.StartsWith("HTTP/1.1 400 Bad Request", raw);
+                Assert.Empty(router.Incoming);
             }
         }
 

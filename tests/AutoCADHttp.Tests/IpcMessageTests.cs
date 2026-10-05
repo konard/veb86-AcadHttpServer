@@ -45,6 +45,32 @@ namespace AutoCADHttp.Tests
             Assert.Throws<FormatException>(() => IpcMessage.Parse(json));
         }
 
+        [Theory]
+        [InlineData("{\"x\":01}")]
+        [InlineData("{\"x\":+1}")]
+        [InlineData("{\"x\":1.}")]
+        [InlineData("{\"x\":.1}")]
+        [InlineData("{\"x\":1e}")]
+        [InlineData("{\"x\":NaN}")]
+        [InlineData("{\"x\":[1,]}")]
+        [InlineData("{\"x\":'single quote'}")]
+        [InlineData("{\"x\":\"bad\\q\"}")]
+        [InlineData("{\"x\":\"bad\\uZZZZ\"}")]
+        [InlineData("{\"x\":1,\"x\":2}")]
+        public void InvalidPayloadSyntax_IsRejected(string parameters)
+        {
+            Assert.Throws<FormatException>(() => IpcMessage.CreateCommand("1", "PING", parameters));
+        }
+
+        [Fact]
+        public void ValidPayloads_PreserveNumberPrecisionAndStringEscapes()
+        {
+            const string payload = "{\"numbers\":[-0,1.5,1e+30000,123456789012345678901234567890],\"text\":\"\\u4e2d\\n\\t\\/\\b\\f\\r\"}";
+            Assert.Equal(payload, IpcMessage.CreateCommand("1", "PING", payload).ParametersJson);
+            const string json = "{\"id\":\"\\u0031\",\"type\":\"command\",\"command\":\"PING\",\"parameters\":{}}";
+            Assert.Equal("1", IpcMessage.Parse(json).Id);
+        }
+
         [Fact]
         public void ExcessiveNesting_IsRejectedWithFiniteInput()
         {

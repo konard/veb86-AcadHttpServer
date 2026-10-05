@@ -38,6 +38,12 @@ namespace AutoCADHttp.Http
             }
             if (_root == null)
                 return HttpResponseInfo.JsonError(404, "Not Found", "Widgets directory is not configured");
+            if (request.Path == "/widgets")
+            {
+                var redirect = new HttpResponseInfo(308, "Permanent Redirect", "text/plain; charset=utf-8", "");
+                redirect.Headers["Location"] = "/widgets/" + request.Target.Substring(request.Path.Length);
+                return redirect;
+            }
             try
             {
                 string relative = Uri.UnescapeDataString(request.Path.Substring("/widgets".Length)).TrimStart('/');

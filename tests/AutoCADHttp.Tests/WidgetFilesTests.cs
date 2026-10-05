@@ -23,8 +23,16 @@ namespace AutoCADHttp.Tests
                 new HttpRequestInfo(method, target, "HTTP/1.1", new Dictionary<string, string>()));
         }
 
+        [Fact]
+        public void BareWidgetRoot_RedirectsToSlash_SoRelativeAssetsResolveUnderWidgets()
+        {
+            File.WriteAllText(Path.Combine(_root, "index.html"), "<html>widget</html>");
+            var response = Get("/widgets?version=1");
+            Assert.Equal(308, response.StatusCode);
+            Assert.Equal("/widgets/?version=1", response.Headers["Location"]);
+        }
+
         [Theory]
-        [InlineData("/widgets")]
         [InlineData("/widgets/")]
         [InlineData("/widgets/index.html?cache=1")]
         public void WidgetRoot_ServesIndex_WithoutQueuingIpc(string path)
@@ -122,6 +130,8 @@ namespace AutoCADHttp.Tests
                 Directory.CreateSymbolicLink(Path.Combine(_root, "linked"), outside);
                 Assert.Equal(403, Get("/widgets/linked.txt").StatusCode);
                 Assert.Equal(403, Get("/widgets/linked/secret.txt").StatusCode);
+                var linkedRoot = new ApiRouter("AutoCAD", "2021", widgetsDirectory: Path.Combine(_root, "linked"));
+                Assert.Equal(403, linkedRoot.Handle(new HttpRequestInfo("GET", "/widgets/secret.txt", "HTTP/1.1", new Dictionary<string, string>())).StatusCode);
             }
             finally { Directory.Delete(outside, true); }
         }

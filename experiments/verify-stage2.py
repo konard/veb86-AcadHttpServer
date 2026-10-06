@@ -28,6 +28,11 @@ log_path.parent.mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix="acadhttp-widgets-") as directory:
     root = pathlib.Path(directory)
     (root / "index.html").write_text("<html>static transport check</html>", encoding="utf-8")
+    for name in ("managerGRIST", "catalog", "common"):
+        (root / name).mkdir()
+    (root / "managerGRIST" / "index.html").write_text("<html>manager widget</html>", encoding="utf-8")
+    (root / "managerGRIST" / "manager.js").write_text("// manager", encoding="utf-8")
+    (root / "managerGRIST" / "style.css").write_text("body {}", encoding="utf-8")
     binary = bytes([137, 80, 78, 71, 0, 255, 128])
     (root / "image.png").write_bytes(binary)
     with log_path.open("w") as log:
@@ -49,6 +54,19 @@ with tempfile.TemporaryDirectory(prefix="acadhttp-widgets-") as directory:
             check_ipc.run_check(base_url, callback_port)
             with urllib.request.urlopen(base_url + "/widgets", timeout=5) as response:
                 assert response.headers["Content-Type"] == "text/html; charset=utf-8"
+                assert response.url == base_url + "/widgets/"
+                listing = response.read().decode()
+                for name in ("managerGRIST/", "catalog/", "common/", "index.html", "image.png"):
+                    assert f'href="{name}"' in listing, listing
+                assert "static transport check" not in listing
+            with urllib.request.urlopen(base_url + "/widgets/managerGRIST/", timeout=5) as response:
+                listing = response.read().decode()
+                for name in ("index.html", "manager.js", "style.css"):
+                    assert f'href="{name}"' in listing, listing
+                assert "manager widget" not in listing
+            with urllib.request.urlopen(base_url + "/widgets/managerGRIST/index.html", timeout=5) as response:
+                assert response.read().decode() == "<html>manager widget</html>"
+            with urllib.request.urlopen(base_url + "/widgets/index.html", timeout=5) as response:
                 assert response.read().decode() == "<html>static transport check</html>"
             with urllib.request.urlopen(base_url + "/widgets/image.png", timeout=5) as response:
                 assert response.headers["Content-Type"] == "image/png"
@@ -61,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix="acadhttp-widgets-") as directory:
                     break
                 time.sleep(0.01)
             assert "IPC received:" in log_path.read_text()
-            print("Widget HTML, binary image, and incoming event verified.")
+            print("Widget directory listings, explicit HTML files, binary image, and incoming event verified.")
         finally:
             if host.poll() is None:
                 host.stdin.write("\n")

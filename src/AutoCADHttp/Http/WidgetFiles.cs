@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
+using System.Text;
 
 namespace AutoCADHttp.Http
 {
-    /// <summary>Static widget resources, independent of IPC and command dispatch.</summary>
+    /// <summary>Widget directory listings and static resources, independent of IPC and command dispatch.</summary>
     public sealed class WidgetFiles
     {
         public const int MaxFileBytes = 8 * 1024 * 1024;
@@ -47,16 +49,15 @@ namespace AutoCADHttp.Http
             try
             {
                 string relative = Uri.UnescapeDataString(request.Path.Substring("/widgets".Length)).TrimStart('/');
-                if (relative.Length == 0 || relative.EndsWith("/", StringComparison.Ordinal))
-                    relative += "index.html";
-                string[] segments = relative.Split('/');
+                string[] segments = relative.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
                 foreach (string segment in segments)
                 {
                     if (segment == "." || segment == ".." || segment.IndexOfAny(new[] { '\\', ':', '\0' }) >= 0)
                         return Forbidden();
                 }
                 string path = Path.GetFullPath(Path.Combine(_root, relative.Replace('/', Path.DirectorySeparatorChar)));
-                if (!path.StartsWith(_root, _pathComparison))
+                if (!path.StartsWith(_root, _pathComparison) &&
+                    !string.Equals(path, Path.GetFullPath(_root), _pathComparison))
                     return Forbidden();
                 // Reject links/junctions, including the configured root, to avoid escaping through a nested link.
                 string current = _root;
@@ -67,6 +68,16 @@ namespace AutoCADHttp.Http
                     current = Path.Combine(current, segment);
                     if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                         return Forbidden();
+                }
+                if (Directory.Exists(path))
+                {
+                    if (!request.Path.EndsWith("/", StringComparison.Ordinal))
+                    {
+                        var redirect = new HttpResponseInfo(308, "Permanent Redirect", "text/plain; charset=utf-8", "");
+                        redirect.Headers["Location"] = request.Path + "/" + request.Target.Substring(request.Path.Length);
+                        return redirect;
+                    }
+                    return ListDirectory(path, request.Path, segments.Length > 0);
                 }
                 if (!File.Exists(path))
                     return HttpResponseInfo.JsonError(404, "Not Found", "Widget file not found");
@@ -97,6 +108,40 @@ namespace AutoCADHttp.Http
             catch (UnauthorizedAccessException) { return Forbidden(); }
             catch (ArgumentException) { return Forbidden(); }
             catch (NotSupportedException) { return Forbidden(); }
+        }
+
+        private static HttpResponseInfo ListDirectory(string path, string requestPath, bool includeParent)
+        {
+            var directories = new List<string>();
+            var files = new List<string>();
+            foreach (string entry in Directory.EnumerateFileSystemEntries(path))
+            {
+                FileAttributes attributes = File.GetAttributes(entry);
+                // Keep links/junctions out of the listing, just as direct requests to them are forbidden.
+                if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                var names = (attributes & FileAttributes.Directory) != 0 ? directories : files;
+                names.Add(Path.GetFileName(entry));
+            }
+            directories.Sort(StringComparer.Ordinal);
+            files.Sort(StringComparer.Ordinal);
+
+            string title = "Index of " + WebUtility.HtmlEncode(Uri.UnescapeDataString(requestPath));
+            var html = new StringBuilder("<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>");
+            html.Append(title).Append("</title></head>\n<body><h1>").Append(title).Append("</h1>\n<ul>\n");
+            if (includeParent) html.Append("<li><a href=\"../\">../</a></li>\n");
+            AppendEntries(html, directories, "/");
+            AppendEntries(html, files, "");
+            html.Append("</ul>\n</body></html>\n");
+            var response = new HttpResponseInfo(200, "OK", "text/html; charset=utf-8", html.ToString());
+            response.Headers["X-Content-Type-Options"] = "nosniff";
+            return response;
+        }
+
+        private static void AppendEntries(StringBuilder html, IEnumerable<string> names, string suffix)
+        {
+            foreach (string name in names)
+                html.Append("<li><a href=\"").Append(Uri.EscapeDataString(name)).Append(suffix)
+                    .Append("\">").Append(WebUtility.HtmlEncode(name)).Append(suffix).Append("</a></li>\n");
         }
 
         private static HttpResponseInfo Forbidden()

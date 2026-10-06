@@ -167,7 +167,10 @@ namespace AutoCADHttp.Tests
             {
                 server.Start();
                 Assert.Equal(settings.Address, server.Address);
-                Assert.Equal("configured widget", await http.GetStringAsync(server.BaseUrl + "widgets/"));
+                string listing = await http.GetStringAsync(server.BaseUrl + "widgets/");
+                Assert.Contains("href=\"index.html\"", listing);
+                Assert.DoesNotContain("configured widget", listing);
+                Assert.Equal("configured widget", await http.GetStringAsync(server.BaseUrl + "widgets/index.html"));
                 using (var response = await http.GetAsync(server.BaseUrl + "ping"))
                     Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                 using (var request = new HttpRequestMessage(HttpMethod.Get, server.BaseUrl + "ping"))

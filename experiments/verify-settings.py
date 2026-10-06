@@ -72,6 +72,10 @@ with tempfile.TemporaryDirectory(prefix="acadhttp-settings-") as directory:
             with http.open(base_url + "/ping", timeout=5) as response:
                 assert json.load(response)["status"] == "ok"
             with http.open(base_url + "/widgets/", timeout=5) as response:
+                listing = response.read().decode()
+                assert 'href="index.html"' in listing, listing
+                assert "configured widget" not in listing
+            with http.open(base_url + "/widgets/index.html", timeout=5) as response:
                 assert response.read().decode() == "<html>configured widget</html>"
             command = json.dumps({"id": "settings-ping", "type": "command", "command": "PING", "parameters": {}}).encode()
             with http.open(urllib.request.Request(base_url + "/ipc", command, {"Content-Type": "application/json"}), timeout=5) as response:

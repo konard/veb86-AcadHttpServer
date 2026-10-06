@@ -10,13 +10,14 @@ namespace StandaloneHost
     {
         private static async Task Main(string[] args)
         {
-            int port = args.Length > 0 ? int.Parse(args[0]) : LocalHttpServer.DefaultPort;
-            string widgets = args.Length > 1 ? args[1] : Environment.GetEnvironmentVariable("ACADHTTP_WIDGETS_DIR");
+            var settings = ServerSettings.Load();
+            int port = args.Length > 0 ? int.Parse(args[0]) : settings.Port;
+            string widgets = args.Length > 1 ? args[1] : settings.WidgetsDirectory;
             string external = args.Length > 2 ? args[2] : Environment.GetEnvironmentVariable("ACADHTTP_EXTERNAL_IPC");
             Action<string> log = m => Console.WriteLine("[HTTP] " + m);
             var router = new ApiRouter("AutoCAD", "2021", widgetsDirectory: widgets);
             using (var outbox = string.IsNullOrWhiteSpace(external) ? null : new IpcOutbox(new Uri(external), log) { Verbose = true })
-            using (var server = new LocalHttpServer(port, router.Handle, log) { Verbose = true })
+            using (var server = new LocalHttpServer(settings.Address, port, router.Handle, log) { Verbose = true })
             using (var stop = new CancellationTokenSource())
             {
                 var dispatcher = new IpcDispatcher(router.Incoming, m =>
@@ -26,7 +27,7 @@ namespace StandaloneHost
                 }, log);
                 dispatcher.Register("PING", m => IpcMessage.CreateResponse(m.Id));
                 dispatcher.MessageReceived += m => log("IPC received: " + m.Json);
-                log("Start(): " + server.Start() + " http://" + server.Address + ":" + server.Port + "/ping");
+                log("Start(): " + server.Start() + " " + server.BaseUrl + "ping");
                 log("second Start(): " + server.Start());
                 // Standalone application context, separate from HTTP request handlers. AutoCAD uses Application.Idle.
                 Task application = Task.Run(async () =>

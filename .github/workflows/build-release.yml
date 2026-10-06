@@ -1,6 +1,6 @@
 # Every push to the default branch (and a manual "Actions → Build & Release → Run workflow"):
 #   checkout → restore NuGet (AutoCAD 2021 API 24.0.0) → build Release / x64 → tests →
-#   AutoCADHttp.dll → AutoCADHttp.zip → GitHub Release v0.0.<N> with the zip as an asset.
+#   AutoCADHttp.dll + AutoCADHttp.settings.json → AutoCADHttp.zip → GitHub Release v0.0.<N>.
 #
 # Version: v$VERSION_PREFIX.<github.run_number> - assigned automatically, nothing to edit before a commit.
 # run_number is unique and increasing for this workflow, so parallel runs can never get the same version;
@@ -100,19 +100,23 @@ jobs:
           # No AutoCAD / Autodesk assemblies (AcMgd.dll, AcDbMgd.dll, AcCoreMgd.dll, AdWindows.dll, ...) in the output
           $foreign = Get-ChildItem $out -Filter *.dll | Where-Object { $_.Name -ne 'AutoCADHttp.dll' }
           if ($foreign) { throw "Unexpected DLLs in the output (AutoCAD DLLs must not be shipped): $($foreign.Name -join ', ')" }
+          $settings = "$out/AutoCADHttp.settings.json"
+          if (!(Test-Path $settings)) { throw "$settings not found beside the DLL" }
+          Get-Content $settings -Raw | ConvertFrom-Json | Out-Null
 
       - name: Create AutoCADHttp.zip
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force package | Out-Null
-          Compress-Archive -Path src/AutoCADHttp/bin/Release/AutoCADHttp.dll -DestinationPath package/AutoCADHttp.zip
+          Compress-Archive -Path src/AutoCADHttp/bin/Release/AutoCADHttp.dll, src/AutoCADHttp/bin/Release/AutoCADHttp.settings.json -DestinationPath package/AutoCADHttp.zip
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path package/AutoCADHttp.zip))
           $entries = @($zip.Entries | ForEach-Object FullName)
           $zip.Dispose()
           Write-Host "AutoCADHttp.zip: $($entries -join ', ')"
-          if ($entries.Count -ne 1 -or $entries[0] -ne 'AutoCADHttp.dll') { throw "AutoCADHttp.zip must contain only AutoCADHttp.dll" }
+          $expected = @('AutoCADHttp.dll', 'AutoCADHttp.settings.json')
+          if ($entries.Count -ne 2 -or (Compare-Object $expected $entries)) { throw "AutoCADHttp.zip must contain AutoCADHttp.dll and AutoCADHttp.settings.json at its root" }
 
       - uses: actions/upload-artifact@v6
         with:
@@ -169,8 +173,8 @@ jobs:
           | AutoCAD API | NuGet AutoCAD.NET 24.0.0 (not included) |
           | Build log | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
 
-          \`AutoCADHttp.zip\` contains only \`AutoCADHttp.dll\`. AutoCAD's own \`AcMgd.dll\`, \`AcDbMgd.dll\`, \`AcCoreMgd.dll\` are not included.
-          Load the DLL in AutoCAD 2021 with \`NETLOAD\`.
+          \`AutoCADHttp.zip\` contains \`AutoCADHttp.dll\` and \`AutoCADHttp.settings.json\`. AutoCAD's own \`AcMgd.dll\`, \`AcDbMgd.dll\`, \`AcCoreMgd.dll\` are not included.
+          Keep both files in the same directory. Edit the JSON address, port, and widgetsDirectory, then load the DLL in AutoCAD 2021 with \`NETLOAD\` and run \`HTTPSTART\`.
           EOF
 
           gh release create "$TAG" AutoCADHttp.zip \

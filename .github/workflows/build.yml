@@ -39,12 +39,16 @@ jobs:
           Write-Host "Assembly: $($asm.FullName), architecture: $($asm.ProcessorArchitecture)"
           if ($asm.ProcessorArchitecture -ne 'Amd64') { throw "Expected x64 (Amd64) assembly" }
           if (Test-Path "src/AutoCADHttp/bin/Release/acmgd.dll") { throw "AutoCAD DLLs must not be copied to the output" }
+          $settings = "src/AutoCADHttp/bin/Release/AutoCADHttp.settings.json"
+          if (!(Test-Path $settings)) { throw "$settings not found beside the DLL" }
+          Get-Content $settings -Raw | ConvertFrom-Json | Out-Null
 
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Copy-Item src/AutoCADHttp/bin/Release/AutoCADHttp.dll artifacts/
+          Copy-Item src/AutoCADHttp/bin/Release/AutoCADHttp.settings.json artifacts/
           Copy-Item src/AutoCADHttp/bin/Release/AutoCADHttp.pdb artifacts/
           Copy-Item README.md artifacts/
           Copy-Item examples/check-ping.ps1 artifacts/
@@ -72,10 +76,11 @@ jobs:
         run: dotnet test AutoCADHttp.sln -c Release --no-build --logger "console;verbosity=normal"
         timeout-minutes: 5
 
-      - name: End-to-end IPC and widgets (standalone host)
+      - name: End-to-end IPC, widgets, and JSON settings (standalone host)
         run: |
           dotnet build examples/StandaloneHost -c Release
           python3 experiments/verify-stage2.py
+          python3 experiments/verify-settings.py
         timeout-minutes: 2
 
       - uses: actions/upload-artifact@v6

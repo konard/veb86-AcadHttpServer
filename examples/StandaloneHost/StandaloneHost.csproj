@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\AutoCADHttp\Http\*.cs" Link="Http\%(Filename)%(Extension)" />
+    <None Include="..\..\src\AutoCADHttp\AutoCADHttp.settings.json" Link="AutoCADHttp.settings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

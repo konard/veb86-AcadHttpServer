@@ -53,7 +53,7 @@ AcCoreMgd.dll
 HTTPSTART
 ```
 
-Сервер слушает:
+По умолчанию сервер слушает (адрес и порт задаются в `AutoCADHttp.settings.json` рядом с DLL):
 
 ```text
 127.0.0.1:5000
@@ -167,7 +167,7 @@ curl: (7) Failed to connect to 127.0.0.1 port 5000 ... Could not connect to serv
 | `GET` / `HEAD /widgets/...` | статический файл из настроенного каталога |
 | неправильный метод `/ipc` или `/widgets` | `405 Method Not Allowed` |
 | любой другой путь | `404 Not Found` |
-| заголовок `Host` не `127.0.0.1` / `localhost` | `403 Forbidden` (защита от DNS rebinding) |
+| заголовок `Host` не локальный / не настроенный адрес | `403 Forbidden` (защита от DNS rebinding) |
 | некорректный запрос | `400 Bad Request` |
 
 ## IPC и Grist Widgets (этап 2)
@@ -188,15 +188,44 @@ HTTP-поток только проверяет конверт и ставит �
 
 ### Настройка
 
-Задайте переменные окружения **до запуска AutoCAD** (или консольного хоста):
+Файл [`AutoCADHttp.settings.json`](src/AutoCADHttp/AutoCADHttp.settings.json) должен лежать **рядом с
+`AutoCADHttp.dll`**. Сборка, CI-артефакт и ZIP из Release включают готовый шаблон:
+
+```json
+{
+  "address": "127.0.0.1",
+  "port": 5000,
+  "widgetsDirectory": "C:\\zcad\\GristWidgets\\widget"
+}
+```
+
+* `address` — локальный IP-адрес: например `127.0.0.1`, `127.0.0.2` или `::1`. `localhost` означает
+  `127.0.0.1`. Привязка к внешним интерфейсам и `0.0.0.0` по-прежнему запрещена.
+* `port` — целое число от `1` до `65535`, по умолчанию `5000`.
+* `widgetsDirectory` — абсолютный путь или путь относительно папки DLL, например `widgets`.
+  В JSON обратные слеши Windows нужно удваивать; можно использовать `C:/zcad/GristWidgets/widget`.
+  Пустая строка или `null` отключают статические ресурсы (`/widgets` возвращает `404`).
+
+Папка текущего чертежа, рабочая папка AutoCAD и расположение `acad.exe` не влияют на поиск файла или
+относительный путь виджетов. Сохраните файл как JSON в UTF-8. Путь настроек виден при загрузке плагина
+и в `HTTPSTATUS`. Настройки читаются при каждом запуске остановленного сервера: после изменения файла
+выполните `HTTPSTOP`, затем `HTTPSTART`. Повторный `HTTPSTART` работающего сервера оставляет его настройки
+без изменений. Ошибки JSON, адреса, порта или пути выводятся с именем файла; сервер не запускается.
+
+Если файла нет, используются прежние `127.0.0.1:5000` и `ACADHTTP_WIDGETS_DIR`. Отсутствующие поля
+сохраняют эти значения; поле `widgetsDirectory`, если присутствует, имеет приоритет над переменной
+окружения. При обновлении DLL сохраните собственный файл настроек, прежде чем распаковывать шаблон.
+
+Дополнительные настройки транспорта остаются в переменных окружения; задайте их **до запуска AutoCAD**
+(или консольного хоста):
 
 ```powershell
-$env:ACADHTTP_WIDGETS_DIR = 'C:\zcad\GristWidgets\widget'
 $env:ACADHTTP_EXTERNAL_IPC = 'http://127.0.0.1:5001/ipc'
 $env:ACADHTTP_VERBOSE = '1' # необязательно: журнал HTTP-запросов и исходящей доставки
 ```
 
-* `ACADHTTP_WIDGETS_DIR` — локальный каталог. Без настройки `/widgets` возвращает `404`.
+* `ACADHTTP_WIDGETS_DIR` — совместимость с прежней настройкой каталога: используется, когда файл JSON
+  или поле `widgetsDirectory` отсутствует. Относительный путь этой переменной, как раньше, считается от рабочей папки.
 * `ACADHTTP_EXTERNAL_IPC` — URL внешнего HTTP(S)-сервера, путь строго `/ipc`.
   Если URL не задан или неверен, входящий сервер продолжает работать, исходящий транспорт отключён.
   Итоговые ответы команд требуют настроенного внешнего сервера.
@@ -317,9 +346,13 @@ Python нужен только для этого примера проверки
 ```text
 dotnet build examples/StandaloneHost -c Release
 python3 experiments/verify-stage2.py
+python3 experiments/verify-settings.py
 ```
 
-Она дополнительно проверяет выдачу HTML/бинарного изображения и приём события, затем останавливает хост.
+Первая проверка также проверяет выдачу HTML/бинарного изображения и приём события, затем останавливает хост.
+Вторая запускает копию хоста с JSON рядом с DLL из другой рабочей папки и проверяет заданные адрес/порт,
+относительный каталог виджетов, IPC и отказ запуска при ошибке настроек. Консольный хост читает тот же JSON
+рядом с `StandaloneHost.dll`; его прежние аргументы порта, каталога и внешнего `/ipc` имеют приоритет.
 
 ## Архитектура
 
@@ -375,8 +408,10 @@ AutoCADHttp.sln
 src/AutoCADHttp/
   AutoCADHttp.csproj         net48, x64; ссылки на AcMgd/AcDbMgd/AcCoreMgd
   HttpServerPlugin.cs        IExtensionApplication + команды HTTPSTART/HTTPSTOP/HTTPSTATUS
+  AutoCADHttp.settings.json  адрес, порт и каталог виджетов; рядом с DLL в выходной папке
   CommandLineLog.cs          потокобезопасный вывод в командную строку (через Application.Idle)
-  Http/LocalHttpServer.cs    HTTP-сервер на 127.0.0.1 (не зависит от AutoCAD)
+  Http/LocalHttpServer.cs    HTTP-сервер на настроенном loopback-адресе (не зависит от AutoCAD)
+  Http/ServerSettings.cs     чтение и проверка JSON относительно папки DLL
   Http/ApiRouter.cs          /ping, POST /ipc, GET /widgets
   Http/IpcMessage.cs         неизменяемые JSON-конверты
   Http/IpcJson.cs            ограниченный JSON parser без дополнительных DLL
@@ -470,7 +505,7 @@ dotnet build AutoCADHttp.sln -c Release
 dotnet test  AutoCADHttp.sln -c Release
 ```
 
-Результат: `src\AutoCADHttp\bin\Release\AutoCADHttp.dll`.
+Результат: `src\AutoCADHttp\bin\Release\AutoCADHttp.dll` и `AutoCADHttp.settings.json` в той же папке.
 
 ### Готовая DLL (GitHub Releases)
 
@@ -487,7 +522,7 @@ Checkout → Restore NuGet (AutoCAD.NET 24.0.0) → Build Release / x64 → те
   commit SHA — в `InformationalVersion`. Номер запуска уникален, поэтому два одновременных запуска не получат
   одну версию; номера неудачных сборок пропускаются. Новую серию (например, `v0.1.N`) можно начать, изменив
   `VERSION_PREFIX` в workflow.
-* `AutoCADHttp.zip` содержит только `AutoCADHttp.dll` — `AcMgd.dll`, `AcDbMgd.dll`, `AcCoreMgd.dll` и другие
+* `AutoCADHttp.zip` содержит `AutoCADHttp.dll` и `AutoCADHttp.settings.json` в корне — `AcMgd.dll`, `AcDbMgd.dll`, `AcCoreMgd.dll` и другие
   DLL Autodesk не включаются (workflow проверяет это и завершается ошибкой, если в выходной папке есть лишние DLL).
 * В описании Release: версия, commit SHA, дата сборки, конфигурация `Release / x64`,
   платформа `AutoCAD 2021 / .NET Framework 4.8`.
@@ -521,6 +556,8 @@ Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) прове
 * выполнение диспетчера в потоке вызывающего приложения, корреляция и изоляция ошибок;
 * исходящий HTTP на реальный локальный peer, тайм-аут/недоступность/HTTP-ошибка, ограничение очереди и отмена;
 * HTML/JS/CSS/изображения/шрифты, бинарный GET и HEAD, изоляция путей и символических ссылок.
+* JSON рядом с DLL, значения по умолчанию, относительные/абсолютные пути, UTF-8, ошибки полей,
+  повторное чтение настроек, пользовательский IPv4/IPv6 loopback-адрес и защита `Host`.
 
 Проверка без AutoCAD вручную — консольный хост того же HTTP-слоя:
 
@@ -532,6 +569,7 @@ curl http://127.0.0.1:5000/ping
 ## Загрузка в AutoCAD
 
 1. Собрать проект (или скачать `AutoCADHttp.zip` из последнего [Release](../../releases/latest) и распаковать).
+   Оставить `AutoCADHttp.settings.json` рядом с DLL и при необходимости задать адрес, порт и каталог виджетов.
 2. Запустить AutoCAD 2021.
 3. Выполнить:
 
@@ -632,8 +670,8 @@ HTTP-сервер предназначен только для локально�
    AutoCAD не могут оба занять порт 5000 — второй получит ошибку «порт занят».
 6. **Выгрузка DLL невозможна** без перезапуска AutoCAD; при закрытии AutoCAD сервер останавливается
    автоматически (`IExtensionApplication.Terminate`).
-7. Адрес `localhost` в браузере/`curl` сначала может разрешаться в IPv6 `::1`, на котором сервер не слушает —
-   клиент переключится на `127.0.0.1`, но лучше сразу использовать `http://127.0.0.1:5000`.
+7. Адрес `localhost` в браузере/`curl` сначала может разрешаться в IPv6 `::1`. По умолчанию сервер слушает
+   IPv4 `127.0.0.1`; для IPv6 задайте `address: "::1"` и используйте `http://[::1]:5000`.
 
 Отладка: если перед запуском AutoCAD задать переменную окружения `ACADHTTP_VERBOSE=1`, каждый HTTP-запрос
 будет выводиться в командную строку (`[HTTP] GET /ping -> 200`).

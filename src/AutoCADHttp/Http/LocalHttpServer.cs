@@ -21,7 +21,7 @@ namespace AutoCADHttp.Http
     }
 
     /// <summary>
-    /// Minimal HTTP/1.1 server bound strictly to 127.0.0.1.
+    /// Minimal HTTP/1.1 server bound to a configurable loopback address (127.0.0.1 by default).
     /// <para>
     /// It is built on <see cref="TcpListener"/> rather than <see cref="HttpListener"/>:
     /// HttpListener goes through the Windows http.sys driver, which requires administrator rights
@@ -46,6 +46,7 @@ namespace AutoCADHttp.Http
 
         private readonly object _sync = new object();
         private readonly int _requestedPort;
+        private readonly IPAddress _address;
         private readonly Func<HttpRequestInfo, HttpResponseInfo> _handler;
         private readonly Action<string> _log;
 
@@ -55,21 +56,37 @@ namespace AutoCADHttp.Http
         private int _requestTimeoutMs = DefaultRequestTimeoutMs;
 
         public LocalHttpServer(int port, Func<HttpRequestInfo, HttpResponseInfo> handler, Action<string> log)
+            : this(IPAddress.Loopback, port, handler, log)
         {
+        }
+
+        public LocalHttpServer(IPAddress address, int port, Func<HttpRequestInfo, HttpResponseInfo> handler, Action<string> log)
+        {
+            if (address == null)
+                throw new ArgumentNullException("address");
+            if (!IPAddress.IsLoopback(address))
+                throw new ArgumentException("The HTTP server requires a loopback address.", "address");
             if (port < 0 || port > 65535)
                 throw new ArgumentOutOfRangeException("port");
             if (handler == null)
                 throw new ArgumentNullException("handler");
 
+            _address = address;
             _requestedPort = port;
             _handler = handler;
             _log = log;
         }
 
-        /// <summary>Listening address. Always the IPv4 loopback address.</summary>
+        /// <summary>Configured loopback listening address.</summary>
         public IPAddress Address
         {
-            get { return IPAddress.Loopback; }
+            get { return _address; }
+        }
+
+        /// <summary>Listening URL, including brackets for IPv6 and the actual bound port.</summary>
+        public string BaseUrl
+        {
+            get { return new UriBuilder("http", Address.ToString(), Port).Uri.AbsoluteUri; }
         }
 
         /// <summary>Actual listening port while running (useful when constructed with port 0), otherwise the configured port.</summary>
@@ -127,7 +144,7 @@ namespace AutoCADHttp.Http
         public bool Verbose { get; set; }
 
         /// <summary>
-        /// Starts listening on 127.0.0.1:<see cref="Port"/>. Calling it while the server is
+        /// Starts listening on <see cref="Address"/>:<see cref="Port"/>. Calling it while the server is
         /// running does nothing and returns <see cref="StartResult.AlreadyRunning"/>.
         /// </summary>
         /// <exception cref="SocketException">The port cannot be bound (e.g. it is already in use).</exception>
@@ -141,7 +158,7 @@ namespace AutoCADHttp.Http
                 // ExclusiveAddressUse is intentionally not set: on Windows SO_EXCLUSIVEADDRUSE prevents
                 // re-binding the port while server-closed connections are in TIME_WAIT,
                 // which would break HTTPSTOP followed by HTTPSTART.
-                var listener = new TcpListener(IPAddress.Loopback, _requestedPort);
+                var listener = new TcpListener(Address, _requestedPort);
 
                 try
                 {
@@ -149,7 +166,7 @@ namespace AutoCADHttp.Http
                 }
                 catch (SocketException ex)
                 {
-                    _lastError = "Cannot listen on " + IPAddress.Loopback + ":" + _requestedPort +
+                    _lastError = "Cannot listen on " + Address + ":" + _requestedPort +
                                  ": " + ex.Message + " (SocketError." + ex.SocketErrorCode + ")";
                     try { listener.Stop(); } catch { }
                     throw;
@@ -279,7 +296,7 @@ namespace AutoCADHttp.Http
                         request = ParseRequestHead(head.Text);
                         if (request == null)
                             response = HttpResponseInfo.JsonError(400, "Bad Request", "Bad request");
-                        else if (!IsAllowedHost(request))
+                        else if (!IsAllowedHost(request, Address))
                             response = HttpResponseInfo.JsonError(403, "Forbidden", "Host not allowed");
                         else
                         {
@@ -480,7 +497,7 @@ namespace AutoCADHttp.Http
         /// Protection against DNS rebinding: a web page from another site that resolves its name to
         /// 127.0.0.1 sends its own host name in the Host header, so only local host names are accepted.
         /// </summary>
-        internal static bool IsAllowedHost(HttpRequestInfo request)
+        internal static bool IsAllowedHost(HttpRequestInfo request, IPAddress address = null)
         {
             string host;
             if (!request.Headers.TryGetValue("Host", out host) || host.Length == 0)
@@ -505,7 +522,9 @@ namespace AutoCADHttp.Http
 
             return string.Equals(host, "127.0.0.1", StringComparison.Ordinal) ||
                    string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
-                   string.Equals(host, "[::1]", StringComparison.Ordinal);
+                   string.Equals(host, "[::1]", StringComparison.Ordinal) ||
+                   (address != null && string.Equals(host, address.AddressFamily == AddressFamily.InterNetworkV6
+                       ? "[" + address + "]" : address.ToString(), StringComparison.OrdinalIgnoreCase));
         }
 
         private void ReportError(string message)

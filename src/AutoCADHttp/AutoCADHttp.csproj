@@ -25,7 +25,7 @@
     <RootNamespace>AutoCADHttp</RootNamespace>
     <Version>0.0.0</Version>
     <Product>AutoCAD HTTP Server</Product>
-    <Description>Local HTTP server (127.0.0.1:5000) running inside AutoCAD 2021</Description>
+    <Description>Configurable local HTTP server running inside AutoCAD 2021</Description>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendPlatformToOutputPath>false</AppendPlatformToOutputPath>
@@ -69,6 +69,10 @@
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net48'">
     <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="AutoCADHttp.settings.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

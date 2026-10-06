@@ -20,7 +20,7 @@ namespace AutoCADHttp
         public const string AppName = "AutoCAD";
         public const string ApplicationVersion = "2021";
 
-        private static readonly ApiRouter Router = CreateRouter();
+        private static ApiRouter Router = new ApiRouter(AppName, ApplicationVersion);
         private static readonly IpcDispatcher CommandDispatcher = CreateDispatcher();
         private static IpcOutbox _outbox;
 
@@ -40,7 +40,7 @@ namespace AutoCADHttp
         }
 
         // One server per AutoCAD process (shared by all open drawings).
-        private static readonly LocalHttpServer Server = new LocalHttpServer(
+        private static LocalHttpServer Server = new LocalHttpServer(
             LocalHttpServer.DefaultPort,
             Router.Handle,
             CommandLineLog.Post)
@@ -55,6 +55,7 @@ namespace AutoCADHttp
             CommandLineLog.Attach();
             Application.Idle += OnIdle;
             CommandLineLog.Write("AutoCADHttp loaded. Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.");
+            CommandLineLog.Write("Settings: " + ServerSettings.FilePath + " (read on HTTPSTART).");
         }
 
         public void Terminate()
@@ -71,13 +72,24 @@ namespace AutoCADHttp
         {
             try
             {
-                StartResult result = Server.Start();
-                if (result == StartResult.AlreadyRunning)
+                if (Server.IsRunning)
                 {
                     CommandLineLog.Write("Server is already running on " + BaseUrl() + " - a second server was not started.");
                     return;
                 }
 
+                // Read only while stopped, so editing JSON cannot disrupt a running server.
+                // Keep the incoming queue shared with the dispatcher across reconfiguration/restart.
+                var settings = ServerSettings.Load();
+                var router = CreateRouter(settings.WidgetsDirectory);
+                var server = new LocalHttpServer(settings.Address, settings.Port, router.Handle, CommandLineLog.Post)
+                {
+                    Verbose = Environment.GetEnvironmentVariable("ACADHTTP_VERBOSE") == "1"
+                };
+                Server.Dispose();
+                Router = router;
+                Server = server;
+                Server.Start();
                 StartOutbox();
                 CommandLineLog.Write("IPC: " + BaseUrl() + "ipc; widgets: " + BaseUrl() + "widgets/");
                 CommandLineLog.Write("Server started: " + BaseUrl() + " (test: " + BaseUrl() + "ping)");
@@ -123,6 +135,7 @@ namespace AutoCADHttp
                 CommandLineLog.Write("HTTP Server: " + (Server.IsRunning ? "RUNNING" : "STOPPED"));
                 CommandLineLog.Write("Address: " + Server.Address);
                 CommandLineLog.Write("Port: " + Server.Port);
+                CommandLineLog.Write("Settings: " + ServerSettings.FilePath);
 
                 DateTime? startedAt = Server.StartedAtUtc;
                 if (startedAt.HasValue)
@@ -147,17 +160,16 @@ namespace AutoCADHttp
             }
         }
 
-        private static ApiRouter CreateRouter()
+        private static ApiRouter CreateRouter(string widgetsDirectory)
         {
             try
             {
-                return new ApiRouter(AppName, ApplicationVersion,
-                    widgetsDirectory: Environment.GetEnvironmentVariable("ACADHTTP_WIDGETS_DIR"));
+                return new ApiRouter(AppName, ApplicationVersion, Router.Incoming, widgetsDirectory);
             }
             catch (System.Exception ex)
             {
-                CommandLineLog.Post("ERROR: invalid ACADHTTP_WIDGETS_DIR: " + ex.Message);
-                return new ApiRouter(AppName, ApplicationVersion);
+                CommandLineLog.Post("ERROR: invalid widgets directory: " + ex.Message);
+                return new ApiRouter(AppName, ApplicationVersion, Router.Incoming);
             }
         }
 
@@ -203,7 +215,7 @@ namespace AutoCADHttp
 
         private static string BaseUrl()
         {
-            return "http://" + Server.Address + ":" + Server.Port + "/";
+            return Server.BaseUrl;
         }
     }
 }

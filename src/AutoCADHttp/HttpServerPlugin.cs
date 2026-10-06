@@ -81,6 +81,11 @@ namespace AutoCADHttp
                 // Read only while stopped, so editing JSON cannot disrupt a running server.
                 // Keep the incoming queue shared with the dispatcher across reconfiguration/restart.
                 var settings = ServerSettings.Load();
+				CommandLineLog.Write("Widgets directory: " +
+					(settings.WidgetsDirectory ?? "<disabled>"));
+				CommandLineLog.Write("Widgets directory exists: " +
+					(settings.WidgetsDirectory != null &&
+					 System.IO.Directory.Exists(settings.WidgetsDirectory)));
                 var router = CreateRouter(settings.WidgetsDirectory);
                 var server = new LocalHttpServer(settings.Address, settings.Port, router.Handle, CommandLineLog.Post)
                 {

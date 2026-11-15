@@ -94,6 +94,9 @@ HTTPSTATUS
 [HTTP] Port: 5000
 [HTTP] Started: 2026-10-03 21:15:04 (uptime 0:02:31)
 [HTTP] URL: http://127.0.0.1:5000/ping
+[HTTP] Incoming IPC queued: 0
+[HTTP] Outgoing IPC: RUNNING http://127.0.0.1:5001/ipc (queued: 0)
+[HTTP] IPC commands registered: 3; event subscriptions: 2; commands awaiting responses: 0
 [HTTP] Requests served: 3
 ```
 
@@ -210,7 +213,8 @@ HTTP-поток только проверяет конверт и ставит �
   "address": "127.0.0.1",
   "port": 5000,
   "widgetsDirectory": "C:\\zcad\\GristWidgets\\widget",
-  "JSONView": 0
+  "JSONView": 0,
+  "externalIpc": ""
 }
 ```
 
@@ -227,6 +231,12 @@ HTTP-поток только проверяет конверт и ставит �
   Вывод идёт через очередь `CommandLineLog.Post()` и печатается в `Application.Idle`: HTTP-поток не
   обращается к AutoCAD API и не ждёт вывода, ответы сервера и передача в `IpcDispatcher` одинаковы при `0` и `1`.
   Текущее значение печатается при `HTTPSTART`. Не зависит от `ACADHTTP_VERBOSE` (журнал HTTP-запросов).
+* `externalIpc` — необязательный URL внешнего приложения для исходящих сообщений: абсолютный `http`/`https`
+  URL с путём ровно `/ipc`, без query и fragment, например `http://127.0.0.1:5001/ipc`. Пустая строка, `null`
+  или отсутствие поля — исходящий транспорт не настроен: входящий сервер работает как обычно, а `TrySend`,
+  `PublishEvent` возвращают `false` с записью в журнал (`SendCommandAsync` завершается `IpcTransportException`).
+  Неверный URL — ошибка настроек, как и для остальных полей. Переменная окружения `ACADHTTP_EXTERNAL_IPC`,
+  если задана, имеет приоритет над полем. Источник итогового URL печатается при `HTTPSTART`.
 
 Папка текущего чертежа, рабочая папка AutoCAD и расположение `acad.exe` не влияют на поиск файла или
 относительный путь виджетов. Сохраните файл как JSON в UTF-8. Путь настроек виден при загрузке плагина
@@ -248,16 +258,19 @@ $env:ACADHTTP_VERBOSE = '1' # необязательно: журнал HTTP-за
 
 * `ACADHTTP_WIDGETS_DIR` — совместимость с прежней настройкой каталога: используется, когда файл JSON
   или поле `widgetsDirectory` отсутствует. Относительный путь этой переменной, как раньше, считается от рабочей папки.
-* `ACADHTTP_EXTERNAL_IPC` — URL внешнего HTTP(S)-сервера, путь строго `/ipc`.
-  Если URL не задан или неверен, входящий сервер продолжает работать, исходящий транспорт отключён.
-  Итоговые ответы команд требуют настроенного внешнего сервера.
+* `ACADHTTP_EXTERNAL_IPC` — URL внешнего HTTP(S)-сервера, путь строго `/ipc`; имеет приоритет над полем
+  `externalIpc` файла настроек. Если URL не задан или неверен, входящий сервер продолжает работать,
+  исходящий транспорт отключён. Итоговые ответы команд требуют настроенного внешнего сервера.
 * По умолчанию подробный журнал выключен. Ошибки доставки и тайм-ауты выводятся всегда через
   очередь `CommandLineLog`, без вызова AutoCAD API из HTTP-потока.
 
-`HTTPSTART` запускает сервер и исходящий worker; `HTTPSTOP` закрывает входящие соединения и отменяет
-исходящий HTTP без ожидания сети в главном потоке. Ожидающие исходящие сообщения отбрасываются;
-уже принятые входящие сообщения сохраняются и будут обработаны после следующего `HTTPSTART`.
-Сервер не запускается при `NETLOAD`.
+`HTTPSTART` читает настройки, запускает сервер и исходящий worker; `HTTPSTOP` закрывает входящие соединения
+и отменяет исходящий HTTP без ожидания сети в главном потоке. Ожидающие исходящие сообщения отбрасываются,
+а все команды, ожидающие ответа (`SendCommandAsync`), сразу завершаются `IpcTransportStoppedException`
+(в журнале: `IPC transport stopped by HTTPSTOP. N pending IPC command(s) failed.`). Регистрации команд и
+подписки модулей сохраняются. Уже принятые входящие сообщения сохраняются и будут обработаны после
+следующего `HTTPSTART`. Сервер не запускается при `NETLOAD`. При выгрузке плагина (выход из AutoCAD)
+сервис останавливает транспорт, завершает ожидающие команды и освобождает все регистрации.
 
 ### Конверты и ответы
 
@@ -306,22 +319,80 @@ Invoke-RestMethod http://127.0.0.1:5000/ipc -Method Post -ContentType 'applicati
 переполнение или остановка даёт `false` и запись в журнал. Один фоновый consumer отправляет сообщения
 по порядку. Тайм-аут — 5 с; ошибка соединения, HTTP-ошибка или тайм-аут записывается в журнал, затем
 обрабатывается следующее сообщение. Автоматического повтора нет: команда могла уже выполниться
-на внешнем сервере. HTTP Client не выполняет AutoCAD API.
+на внешнем сервере. Поэтому каждое сообщение отправляется по новому соединению (`Connection: close`, без пула):
+повторное использование соединения, которое внешний сервер как раз закрывает (например, HTTP/1.0
+`http.server` Python), теряло бы следующее сообщение с ошибкой «response ended prematurely».
+HTTP Client не выполняет AutoCAD API.
 
-### Добавление обработчиков и исходящих событий
+### Общий IPC-сервис для модулей (`IIpcService`)
 
-Из корректного контекста приложения (в AutoCAD — главного потока):
+В процессе AutoCAD один сервис — `HttpServerPlugin.Ipc` (`IIpcService`). Модули не создают свои HTTP-серверы,
+HTTP Client и очереди: входящие сообщения приходят через единственный `POST /ipc`, исходящие уходят через
+единственную ограниченную очередь `IpcOutbox`. Регистрация не зависит от `HTTPSTART`: модуль может
+зарегистрироваться при своей загрузке, регистрации переживают `HTTPSTOP`/`HTTPSTART`.
 
 ```csharp
-HttpServerPlugin.Dispatcher.Register("STATUS", message =>
-    IpcMessage.CreateResponse(message.Id, "{\"state\":\"ready\"}"));
+// В IExtensionApplication.Initialize модуля (поле _ipc — для Dispose в Terminate).
+_ipc = new IpcModule(HttpServerPlugin.Ipc, "Devices");
 
-HttpServerPlugin.QueueOutgoing(
-    IpcMessage.CreateEvent(Guid.NewGuid().ToString(), "OBJECT_CREATED", "{}"));
+// Входящая команда. Имена уникальны во всём процессе и сравниваются без учёта регистра.
+_ipc.RegisterCommand("DEVICE_INFO", message =>
+{
+    // Обработчик выполняется в Application.Idle (главный поток) и не ждёт сети.
+    _ipc.SendCommandAsync("GRISTGET_DEVICE", message.ParametersJson, TimeSpan.FromSeconds(10))
+        .ContinueWith(t => _ipc.PublishEvent("DEVICE_INFO.COMPLETED", t.Status == TaskStatus.RanToCompletion
+            ? t.Result.ResultJson ?? "{}" : "{}"), TaskScheduler.Default);
+    return IpcMessage.CreateResponse(message.Id, "{\"accepted\":true}");
+});
+
+// Событие: подписчиков может быть несколько, ответ на события не отправляется.
+_ipc.SubscribeEvent("PROJECT.UPDATED", message => { /* ... */ });
+
+// Исходящее событие с новым уникальным id; true — поставлено в очередь (не «доставлено»).
+bool queued = _ipc.PublishEvent("DEVICE.CREATED", "{\"deviceId\":5}");
+
+// В IExtensionApplication.Terminate модуля: снимает только регистрации этого модуля.
+_ipc.Dispose();
 ```
 
-Будущие обработчики, использующие AutoCAD API, должны также обеспечить нужный контекст команды,
-`LockDocument` и транзакции; одного idle-события для всех операций с чертежом недостаточно.
+Без `IpcModule` те же операции доступны напрямую: `HttpServerPlugin.Ipc.RegisterCommand("Devices", "DEVICE_INFO", handler)`
+и `SubscribeEvent("Devices", "PROJECT.UPDATED", handler)` возвращают `IDisposable`; его `Dispose` удаляет ровно эту
+регистрацию, поэтому один модуль не может снять обработчики другого.
+
+* **Регистрация команд.** Повторная регистрация занятого имени (в том числе другим модулем или в другом регистре)
+  выбрасывает `InvalidOperationException` с именем модуля-владельца: `IPC command 'DEVICE_INFO' is already
+  registered by module 'Devices'`. Тихой замены нет. Обработчик возвращает ответ с тем же `id`
+  (`IpcMessage.CreateResponse`/`CreateError`); исключение превращается в `COMMAND_FAILED`, неизвестная команда — в
+  `UNKNOWN_COMMAND`, следующие сообщения обрабатываются как обычно.
+* **События.** `SubscribeEvent(module, event, handler)` — имя без учёта регистра, `"*"` — все события. Вызываются все
+  подписчики; исключение одного записывается в журнал и не мешает остальным. Автоматических ответов на события нет.
+* **Исходящие сообщения.** `TrySend(message)` и `PublishEvent(event, parametersJson)` возвращаются сразу:
+  `true` — сообщение в очереди, `false` — транспорт не настроен, остановлен или очередь переполнена (с записью в журнал).
+* **Исходящие команды.** `SendCommandAsync(command, parametersJson, timeout, cancellationToken)` создаёт уникальный `id`
+  и возвращает `Task<IpcMessage>`, который завершается ответом внешнего приложения (`type: response` с тем же `id`,
+  `status` `ok` или `error`), пришедшим на `POST /ipc`. Ответы с неизвестным `id` (в том числе опоздавшие после
+  тайм-аута) игнорируются. Задача никогда не ждёт бесконечно:
+  * `TimeoutException` — по истечении `timeout` (по умолчанию 30 с);
+  * отмена через `cancellationToken`;
+  * `IpcTransportException` — команду не удалось поставить в очередь (транспорт не настроен или очередь заполнена);
+  * `IpcTransportStoppedException` — `HTTPSTOP`, перезапуск транспорта или выгрузка плагина.
+
+**Потоки.** HTTP-поток только разбирает конверт и ставит его в очередь. Обработчики команд, подписчики событий и
+сопоставление ответов выполняются в `Drain(32)` из `Application.Idle` в главном потоке. Продолжения задачи
+`SendCommandAsync` никогда не выполняются синхронно внутри `Drain`, поэтому не блокируют AutoCAD; не вызывайте
+`.Result`/`.Wait()` в главном потоке. Продолжение выполняется в пуле потоков: для AutoCAD API из него нужно
+вернуться в главный поток (например, через собственную очередь, читаемую в `Application.Idle`). Выполнение в
+Idle само по себе не делает работу с чертежом безопасной: обработчики, изменяющие DWG, сами берут
+`Document.LockDocument()` и открывают транзакции.
+
+**Совместимость.** `HttpServerPlugin.Dispatcher.Register(command, handler)` и `HttpServerPlugin.QueueOutgoing(message)`
+продолжают работать (регистрация от имени модуля `AutoCADHttp`), но `Register` теперь возвращает `IDisposable` и
+выбрасывает `InvalidOperationException` для уже занятого имени вместо тихой замены обработчика.
+
+Проверка без AutoCAD: [`examples/external-ipc-app.py`](examples/external-ipc-app.py) — пример внешнего приложения
+(отвечает на `GRISTGET_DEVICE`, отправляет команды и события), [`experiments/verify-ipc-service.py`](experiments/verify-ipc-service.py)
+запускает консольный хост с демонстрационными модулями `Devices` и `Reports` и проверяет весь сценарий
+(выполняется в CI).
 
 ### Статические ресурсы Grist
 
@@ -390,6 +461,7 @@ dotnet build examples/StandaloneHost -c Release
 python3 experiments/verify-stage2.py
 python3 experiments/verify-settings.py
 python3 experiments/verify-jsonview.py
+python3 experiments/verify-ipc-service.py
 ```
 
 Первая проверка также проверяет списки каталогов, явно указанные HTML-файлы, бинарное изображение и приём
@@ -399,6 +471,10 @@ python3 experiments/verify-jsonview.py
 рядом с `StandaloneHost.dll`; его прежние аргументы порта, каталога и внешнего `/ipc` имеют приоритет.
 Третья проверяет `JSONView` = `1`, `0`, отсутствие поля и недопустимое значение: вывод исходного JSON по порядку
 только при `1`, отсутствие вывода некорректного JSON и одинаковые HTTP-ответы и обработку `PING`.
+Четвёртая проверяет общий IPC-сервис с двумя демонстрационными модулями и внешним приложением
+[`examples/external-ipc-app.py`](examples/external-ipc-app.py): отказ дублирующей регистрации, `SendCommandAsync` с
+ответом по тому же `id`, событие двум подписчикам без ответа, `UNKNOWN_COMMAND`, тайм-аут и немедленное завершение
+ожидающей команды при остановке транспорта.
 
 ## Архитектура
 
@@ -462,7 +538,11 @@ src/AutoCADHttp/
   Http/ApiRouter.cs          /ping, POST /ipc, GET /widgets
   Http/IpcMessage.cs         неизменяемые JSON-конверты
   Http/IpcJson.cs            ограниченный JSON parser без дополнительных DLL
-  Http/IpcDispatcher.cs      отдельный диспетчер, вызывается приложением
+  Http/IpcDispatcher.cs      команды модулей (уникальные имена) и подписки на события, вызывается в Drain
+  Http/IIpcService.cs        общий IPC-сервис для модулей (HttpServerPlugin.Ipc)
+  Http/IpcService.cs         реализация: входящая очередь, SendCommandAsync, жизненный цикл транспорта
+  Http/IpcModule.cs          регистрации одного модуля с общим Dispose
+  Http/IpcTransportException.cs  ошибки транспорта для SendCommandAsync
   Http/IpcOutbox.cs          исходящая очередь + фоновый HTTP Client
   Http/WidgetFiles.cs        файлы из настроенного каталога
   Http/HttpMessages.cs       модели запроса/ответа

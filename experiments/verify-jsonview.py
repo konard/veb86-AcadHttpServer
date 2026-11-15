@@ -85,7 +85,7 @@ for name, settings in [("on", {"JSONView": 1}), ("off", {"JSONView": 0}), ("miss
     text, results = run(name, settings)
     outputs[name] = results
     shown = re.findall(r"\[HTTP\] IPC JSON: ", text)
-    received = re.findall(r'IPC result \(external endpoint not configured\): \{"id":"(123|seq-\d)"', text)
+    received = re.findall(r'IPC outgoing (123|seq-\d) \(response\) rejected: the external /ipc transport is not running', text)
     assert [code for code, _ in results] == [202, 202, 202, 202, 400, 400], results
     assert received == ["123", "seq-1", "seq-2", "seq-3"], text  # dispatcher got every valid message in every mode
     if name == "on":

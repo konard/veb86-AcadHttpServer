@@ -64,8 +64,8 @@ namespace AutoCADHttp.Tests
         [Fact]
         public void ShippedSettingsTemplate_DisablesJsonView()
         {
-            string template = Path.Combine(Path.GetDirectoryName(typeof(ServerSettingsTests).Assembly.Location),
-                "template", ServerSettings.FileName);
+            // AppContext.BaseDirectory: on net48 xUnit shadow-copies the assembly without content files.
+            string template = Path.Combine(AppContext.BaseDirectory, "template", ServerSettings.FileName);
             File.Copy(template, SettingsPath);
             var settings = ServerSettings.LoadFromDirectory(_directory);
             Assert.False(settings.JsonView);

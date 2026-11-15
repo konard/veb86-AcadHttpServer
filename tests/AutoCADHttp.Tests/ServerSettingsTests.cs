@@ -37,6 +37,7 @@ namespace AutoCADHttp.Tests
             Assert.Equal(IPAddress.Loopback, settings.Address);
             Assert.Equal(5000, settings.Port);
             Assert.Equal(Environment.GetEnvironmentVariable("ACADHTTP_WIDGETS_DIR"), settings.WidgetsDirectory);
+            Assert.False(settings.JsonView);
             Assert.False(File.Exists(SettingsPath));
         }
 
@@ -47,6 +48,28 @@ namespace AutoCADHttp.Tests
             Assert.Equal(IPAddress.Loopback, settings.Address);
             Assert.Equal(5000, settings.Port);
             Assert.Equal(Environment.GetEnvironmentVariable("ACADHTTP_WIDGETS_DIR"), settings.WidgetsDirectory);
+            Assert.False(settings.JsonView);
+        }
+
+        [Theory]
+        [InlineData("0", false)]
+        [InlineData("1", true)]
+        public void JsonView_AcceptsZeroAndOne(string value, bool expected)
+        {
+            var settings = Load("{\"address\":\"127.0.0.1\",\"port\":5000,\"widgetsDirectory\":\"\",\"JSONView\":" + value + "}");
+            Assert.Equal(expected, settings.JsonView);
+            Assert.Equal(5000, settings.Port);
+        }
+
+        [Fact]
+        public void ShippedSettingsTemplate_DisablesJsonView()
+        {
+            // AppContext.BaseDirectory: on net48 xUnit shadow-copies the assembly without content files.
+            string template = Path.Combine(AppContext.BaseDirectory, "template", ServerSettings.FileName);
+            File.Copy(template, SettingsPath);
+            var settings = ServerSettings.LoadFromDirectory(_directory);
+            Assert.False(settings.JsonView);
+            Assert.Equal(5000, settings.Port);
         }
 
         [Fact]
@@ -105,6 +128,13 @@ namespace AutoCADHttp.Tests
         [InlineData("{\"address\":\"192.168.1.10\"}", "address")]
         [InlineData("{\"address\":\"example.com\"}", "address")]
         [InlineData("{\"widgetsDirectory\":42}", "widgetsDirectory")]
+        [InlineData("{\"JSONView\":2}", "JSONView")]
+        [InlineData("{\"JSONView\":-1}", "JSONView")]
+        [InlineData("{\"JSONView\":1.0}", "JSONView")]
+        [InlineData("{\"JSONView\":1e0}", "JSONView")]
+        [InlineData("{\"JSONView\":\"1\"}", "JSONView")]
+        [InlineData("{\"JSONView\":true}", "JSONView")]
+        [InlineData("{\"JSONView\":null}", "JSONView")]
         [InlineData("{\"widgetsDirectory\":\"bad\\u0000path\"}", "widgetsDirectory")]
         public void InvalidSettings_ReportFileAndReason(string json, string reason)
         {

@@ -169,5 +169,124 @@ namespace AutoCADHttp.Tests
             }
         }
 
+        private const string PingJson = "{\n  \"id\": \"123\",\n  \"type\": \"command\",\n  \"command\": \"PING\",\n  \"parameters\": {}\n}";
+
+        private static async Task<string> PostIpc(HttpClient http, LocalHttpServer server, string json)
+        {
+            using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
+            using (var response = await http.PostAsync("http://127.0.0.1:" + server.Port + "/ipc", content))
+                return (int)response.StatusCode + " " + await response.Content.ReadAsStringAsync();
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task JsonView_ShowsOriginalBodyOnlyWhenEnabled_AndDoesNotChangeProcessing(bool enabled)
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            if (enabled)
+                router.JsonView = shown.Enqueue;
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                Assert.Equal("202 " + IpcMessage.CreateResponse("123", "{\"queued\":true}").Json,
+                    await PostIpc(http, server, PingJson));
+                IpcMessage queued = router.Incoming.Single();
+                Assert.Equal(PingJson, queued.Json);
+                Assert.Equal("PING", queued.Command);
+                // JSON is shown byte-for-byte as received (formatting, key order and values untouched).
+                Assert.Equal(enabled ? new[] { PingJson } : new string[0], shown.ToArray());
+
+                // The queued message reaches IpcDispatcher in both modes.
+                var results = new System.Collections.Generic.List<IpcMessage>();
+                var dispatcher = new IpcDispatcher(router.Incoming, results.Add);
+                dispatcher.Register("PING", m => IpcMessage.CreateResponse(m.Id));
+                Assert.Equal(1, dispatcher.Drain());
+                Assert.Equal("123", results.Single().Id);
+            }
+        }
+
+        [Fact]
+        public async Task JsonView_SequentialMessages_AreShownInOrder()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            var sent = Enumerable.Range(1, 5).Select(i => IpcMessage.CreateCommand(i.ToString(), "PING").Json).ToArray();
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                foreach (string json in sent)
+                    Assert.StartsWith("202 ", await PostIpc(http, server, json));
+                Assert.Equal(sent, shown.ToArray());
+                Assert.Equal(sent, router.Incoming.Select(m => m.Json).ToArray());
+            }
+        }
+
+        [Fact]
+        public async Task JsonView_ConcurrentMessages_AreShownInIncomingQueueOrder()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                await Task.WhenAll(Enumerable.Range(0, 50).Select(async i =>
+                    Assert.StartsWith("202 ", await PostIpc(http, server, IpcMessage.CreateCommand(i.ToString(), "PING").Json))));
+                Assert.Equal(50, shown.Count);
+                Assert.Equal(router.Incoming.Select(m => m.Json).ToArray(), shown.ToArray());
+            }
+        }
+
+        [Theory]
+        [InlineData("{")]
+        [InlineData("{}")]
+        [InlineData("{\"id\":\"1\",\"type\":\"unknown\"}")]
+        [InlineData("[]")]
+        public async Task JsonView_InvalidJson_IsNeitherShownNorQueued(string body)
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                Assert.Equal("400 " + IpcMessage.ErrorJson(null, "INVALID_JSON"),
+                    await PostIpc(http, server, body));
+                Assert.Empty(shown);
+                Assert.Empty(router.Incoming);
+            }
+        }
+
+        [Fact]
+        public void JsonView_WrongContentTypeOrMethod_IsNotShown()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            string json = IpcMessage.CreateCommand("1", "PING").Json;
+            var text = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "text/plain" } };
+            Assert.Equal(415, router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", text, json)).StatusCode);
+            var jsonType = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "application/json" } };
+            Assert.Equal(405, router.Handle(new HttpRequestInfo("PUT", "/ipc", "HTTP/1.1", jsonType, json)).StatusCode);
+            Assert.Empty(shown);
+            Assert.Empty(router.Incoming);
+        }
+
+        [Fact]
+        public void JsonView_FailingOutput_DoesNotChangeResponseOrQueue()
+        {
+            var router = new ApiRouter("AutoCAD", "2021") { JsonView = json => { throw new InvalidOperationException("output failed"); } };
+            var headers = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "application/json" } };
+            var response = router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", headers, PingJson));
+            Assert.Equal(202, response.StatusCode);
+            Assert.Equal("123", router.Incoming.Single().Id);
+        }
     }
 }

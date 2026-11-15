@@ -1,6 +1,10 @@
 # Every push to the default branch (and a manual "Actions → Build & Release → Run workflow"):
 #   checkout → restore NuGet (AutoCAD 2021 API 24.0.0) → build Release / x64 → tests →
-#   AutoCADHttp.dll + AutoCADHttp.settings.json → AutoCADHttp.zip → GitHub Release v0.0.<N>.
+#   AutoCADHttp.dll + AutoCADHttp.settings.json → scripts/package-release.ps1 → GitHub Release v0.0.<N> with
+#     AutoCADHttp.zip                                 DLL + settings for NETLOAD;
+#     AcadHttpServer-manual-install-v0.0.<N>.zip      per-user installation without an installer (AutoCAD 2020-2024):
+#                                                    %APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle;
+#     release-manifest.txt                            SHA256 of the archives.
 #
 # Version: v$VERSION_PREFIX.<github.run_number> - assigned automatically, nothing to edit before a commit.
 # run_number is unique and increasing for this workflow, so parallel runs can never get the same version;
@@ -104,24 +108,22 @@ jobs:
           if (!(Test-Path $settings)) { throw "$settings not found beside the DLL" }
           Get-Content $settings -Raw | ConvertFrom-Json | Out-Null
 
-      - name: Create AutoCADHttp.zip
+      # AutoCADHttp.zip (NETLOAD), AcadHttpServer-manual-install-v<version>.zip
+      # (%APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle, AutoCAD 2020-2024) and release-manifest.txt.
+      - name: Create release archives
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force package | Out-Null
-          Compress-Archive -Path src/AutoCADHttp/bin/Release/AutoCADHttp.dll, src/AutoCADHttp/bin/Release/AutoCADHttp.settings.json -DestinationPath package/AutoCADHttp.zip
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path package/AutoCADHttp.zip))
-          $entries = @($zip.Entries | ForEach-Object FullName)
-          $zip.Dispose()
-          Write-Host "AutoCADHttp.zip: $($entries -join ', ')"
-          $expected = @('AutoCADHttp.dll', 'AutoCADHttp.settings.json')
-          if ($entries.Count -ne 2 -or (Compare-Object $expected $entries)) { throw "AutoCADHttp.zip must contain AutoCADHttp.dll and AutoCADHttp.settings.json at its root" }
+          ./scripts/package-release.ps1 -Version ${{ steps.version.outputs.version }}
+          ./scripts/test-release-package.ps1 -Version ${{ steps.version.outputs.version }}
+
+      - name: Test manual installation (install.cmd / uninstall.cmd, temporary %APPDATA%)
+        shell: pwsh
+        run: ./scripts/test-manual-install.ps1 -Version ${{ steps.version.outputs.version }}
 
       - uses: actions/upload-artifact@v6
         with:
           name: AutoCADHttp-${{ steps.version.outputs.tag }}
-          path: package/AutoCADHttp.zip
+          path: package/
           if-no-files-found: error
           retention-days: 30
 
@@ -147,7 +149,11 @@ jobs:
           BUILD_DATE: ${{ needs.build.outputs.build_date }}
         run: |
           set -euo pipefail
+          MANUAL="AcadHttpServer-manual-install-v${VERSION}.zip"
           test -s AutoCADHttp.zip
+          test -s "$MANUAL"
+          test -s release-manifest.txt
+          (grep -E '^[0-9a-f]{64}  ' release-manifest.txt | sha256sum --check --strict)
 
           # A failed earlier attempt may have left a draft (gh uploads assets to a draft and publishes it last).
           if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
@@ -163,21 +169,27 @@ jobs:
           cat > notes.md <<EOF
           AutoCAD HTTP Server plugin **${TAG}**
 
+          | File | Purpose |
+          |---|---|
+          | \`${MANUAL}\` | **Manual per-user installation without an installer** for AutoCAD 2020–2024 x64, no administrator rights: \`%APPDATA%\\Autodesk\\ApplicationPlugins\\AcadHttpServer.bundle\`, loaded by AutoCAD automatically. \`install.cmd\`, \`uninstall.cmd\` and the \`INSTALL.md\` guide are inside. |
+          | \`AutoCADHttp.zip\` | \`AutoCADHttp.dll\` and \`AutoCADHttp.settings.json\` for \`NETLOAD\` from any folder (keep both files together). |
+          | \`release-manifest.txt\` | SHA256 checksums of the archives. |
+
           | | |
           |---|---|
           | Version | \`${VERSION}\` |
           | Commit | [\`${GITHUB_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |
           | Build date | ${BUILD_DATE} |
           | Configuration | Release / x64 |
-          | Target platform | AutoCAD 2021 / .NET Framework 4.8 |
+          | Target platform | AutoCAD 2020–2024 / .NET Framework 4.8 |
           | AutoCAD API | NuGet AutoCAD.NET 24.0.0 (not included) |
           | Build log | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |
 
-          \`AutoCADHttp.zip\` contains \`AutoCADHttp.dll\` and \`AutoCADHttp.settings.json\`. AutoCAD's own \`AcMgd.dll\`, \`AcDbMgd.dll\`, \`AcCoreMgd.dll\` are not included.
-          Keep both files in the same directory. Edit the JSON address, port, and widgetsDirectory, then load the DLL in AutoCAD 2021 with \`NETLOAD\` and run \`HTTPSTART\`.
+          AutoCAD's own \`AcMgd.dll\`, \`AcDbMgd.dll\`, \`AcCoreMgd.dll\` are not included. The HTTP server starts only with \`HTTPSTART\`;
+          settings (address, port, widgetsDirectory) are read from \`AutoCADHttp.settings.json\` next to the DLL.
           EOF
 
-          gh release create "$TAG" AutoCADHttp.zip \
+          gh release create "$TAG" AutoCADHttp.zip "$MANUAL" release-manifest.txt \
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --notes-file notes.md

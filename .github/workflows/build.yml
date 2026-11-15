@@ -1,5 +1,6 @@
 # CI: build + tests on Windows (net48 / net8.0) and Linux (net8.0) for pull requests and pushes to main.
-# GitHub Releases (AutoCADHttp.zip) are published by build-release.yml.
+# GitHub Releases (AutoCADHttp.zip, AcadHttpServer-manual-install-v<version>.zip) are published by build-release.yml;
+# the same packaging scripts and the manual installation are checked here on every pull request.
 name: Build
 
 on:
@@ -43,6 +44,14 @@ jobs:
           if (!(Test-Path $settings)) { throw "$settings not found beside the DLL" }
           Get-Content $settings -Raw | ConvertFrom-Json | Out-Null
 
+      - name: Release archives + manual installation (install.cmd / uninstall.cmd, temporary %APPDATA%)
+        shell: pwsh
+        run: |
+          ./scripts/package-release.ps1 -Version 0.0.0
+          ./scripts/test-release-package.ps1 -Version 0.0.0
+          ./scripts/test-manual-install.ps1 -Version 0.0.0
+        timeout-minutes: 3
+
       - name: Package
         shell: pwsh
         run: |
@@ -57,6 +66,12 @@ jobs:
         with:
           name: AutoCADHttp-AutoCAD2021-x64
           path: artifacts/
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: AcadHttpServer-manual-install
+          path: package/
+          if-no-files-found: error
 
   linux:
     name: Tests (Linux, net8.0) + DLL build check
@@ -82,6 +97,13 @@ jobs:
           python3 experiments/verify-stage2.py
           python3 experiments/verify-settings.py
         timeout-minutes: 2
+
+      - name: Release archives layout (AcadHttpServer.bundle, PackageContents.xml) + negative checks
+        run: |
+          pwsh -NoProfile -File scripts/package-release.ps1 -Version 0.0.0
+          pwsh -NoProfile -File scripts/test-release-package.ps1 -Version 0.0.0
+          python3 experiments/verify-release-package.py pwsh package 0.0.0
+        timeout-minutes: 3
 
       - uses: actions/upload-artifact@v6
         if: failure()

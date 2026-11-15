@@ -1,6 +1,12 @@
 # AutoCAD HTTP Server
 
-C#-плагин для **AutoCAD 2021**, реализующий локальный HTTP-сервер непосредственно внутри процесса AutoCAD.
+C#-плагин для **AutoCAD 2020–2024** (собирается с AutoCAD 2021 API), реализующий локальный HTTP-сервер
+непосредственно внутри процесса AutoCAD.
+
+**Установка без инсталлятора и без прав администратора:** скачайте `AcadHttpServer-manual-install-v<версия>.zip`
+из последнего [Release](../../releases/latest), распакуйте и запустите `install.cmd` — пакет
+`AcadHttpServer.bundle` копируется в `%APPDATA%\Autodesk\ApplicationPlugins` и загружается AutoCAD автоматически
+(см. [«Ручная установка (AutoCAD 2020–2024)»](#ручная-установка-autocad-20202024)).
 
 Проект предоставляет двунаправленный JSON IPC-транспорт и локальные статические ресурсы Grist-виджетов без внешнего Python/Flask-сервера.
 
@@ -29,13 +35,18 @@ HTTP-сервер запускается и останавливается ко�
 
 ## Целевая платформа
 
-* **AutoCAD 2021**
+* **AutoCAD 2020, 2021, 2022, 2023, 2024** (R23.1–R24.3)
 * **.NET Framework 4.8**
 * **x64**
 * C#
 * AutoCAD .NET API
 
-Используются библиотеки AutoCAD 2021:
+DLL компилируется с библиотеками AutoCAD 2021 (R24.0) — используемые API есть во всех версиях 2020–2024,
+а сборки AutoCAD API не имеют строгого имени, поэтому одна DLL загружается во всех этих версиях.
+AutoCAD 2020 сам требует .NET Framework 4.7 — для плагина нужен .NET Framework 4.8 (входит в Windows 10
+версии 1903 и новее). AutoCAD 2025 и новее работают на .NET 8 и этим пакетом не поддерживаются.
+
+Используются библиотеки AutoCAD:
 
 ```text
 AcMgd.dll
@@ -128,6 +139,9 @@ GET http://127.0.0.1:5000/ping
   "version": "2021"
 }
 ```
+
+`version` — год запущенного AutoCAD (`2020`, `2021`, `2022`, `2023`, `2024`), определяется по
+`Application.Version` (R23.1, R24.0–R24.3); для других выпусков — номер вида `R25.0`.
 
 Проверить можно непосредственно через браузер (открыть `http://127.0.0.1:5000/ping`) или через `curl` (встроен в Windows 10/11):
 
@@ -429,6 +443,7 @@ AutoCADHttp.sln
 src/AutoCADHttp/
   AutoCADHttp.csproj         net48, x64; ссылки на AcMgd/AcDbMgd/AcCoreMgd
   HttpServerPlugin.cs        IExtensionApplication + команды HTTPSTART/HTTPSTOP/HTTPSTATUS
+  AcadRelease.cs             номер выпуска AutoCAD (R23.1…R24.3) → год 2020…2024 для /ping
   AutoCADHttp.settings.json  адрес, порт и каталог виджетов; рядом с DLL в выходной папке
   CommandLineLog.cs          потокобезопасный вывод в командную строку (через Application.Idle)
   Http/LocalHttpServer.cs    HTTP-сервер на настроенном loopback-адресе (не зависит от AutoCAD)
@@ -441,6 +456,13 @@ src/AutoCADHttp/
   Http/WidgetFiles.cs        файлы из настроенного каталога
   Http/HttpMessages.cs       модели запроса/ответа
 tests/AutoCADHttp.Tests/     xUnit-тесты HTTP-слоя (без AutoCAD)
+installer_acad/
+  PackageContents.xml        описание AcadHttpServer.bundle для автозагрузчика AutoCAD 2020–2024
+installer_manual/            install.cmd, uninstall.cmd, INSTALL.md — корень архива ручной установки
+scripts/
+  package-release.ps1        AutoCADHttp.zip, AcadHttpServer-manual-install-v<версия>.zip, release-manifest.txt
+  test-release-package.ps1   проверка состава архивов и PackageContents.xml
+  test-manual-install.ps1    install.cmd / uninstall.cmd на временном %APPDATA% (Windows)
 examples/                    скрипты проверки /ping, консольный хост сервера без AutoCAD
 ```
 
@@ -535,8 +557,15 @@ dotnet test  AutoCADHttp.sln -c Release
 
 ```text
 Checkout → Restore NuGet (AutoCAD.NET 24.0.0) → Build Release / x64 → тесты → AutoCADHttp.dll
-         → AutoCADHttp.zip → GitHub Release vX.Y.N (AutoCADHttp.zip в Assets)
+         → scripts/package-release.ps1 → проверка архивов и install.cmd / uninstall.cmd
+         → GitHub Release vX.Y.N (Assets ниже)
 ```
+
+| Файл в Assets | Назначение |
+| --- | --- |
+| `AcadHttpServer-manual-install-vX.Y.N.zip` | **ручная установка в профиль пользователя** для AutoCAD 2020–2024, без инсталлятора и прав администратора; инструкция `INSTALL.md` внутри |
+| `AutoCADHttp.zip` | `AutoCADHttp.dll` и `AutoCADHttp.settings.json` для загрузки командой `NETLOAD` из любой папки |
+| `release-manifest.txt` | контрольные суммы SHA256 архивов |
 
 * Версия формируется автоматически: `v0.0.<номер запуска workflow>` (`v0.0.1`, `v0.0.2`, …); менять версию
   перед commit не нужно. Та же версия записывается в `AutoCADHttp.dll` (`AssemblyVersion`/`FileVersion`),
@@ -545,8 +574,11 @@ Checkout → Restore NuGet (AutoCAD.NET 24.0.0) → Build Release / x64 → те
   `VERSION_PREFIX` в workflow.
 * `AutoCADHttp.zip` содержит `AutoCADHttp.dll` и `AutoCADHttp.settings.json` в корне — `AcMgd.dll`, `AcDbMgd.dll`, `AcCoreMgd.dll` и другие
   DLL Autodesk не включаются (workflow проверяет это и завершается ошибкой, если в выходной папке есть лишние DLL).
-* В описании Release: версия, commit SHA, дата сборки, конфигурация `Release / x64`,
-  платформа `AutoCAD 2021 / .NET Framework 4.8`.
+* `AcadHttpServer-manual-install-vX.Y.N.zip` повторяет структуру профиля пользователя — см.
+  [«Ручная установка (AutoCAD 2020–2024)»](#ручная-установка-autocad-20202024). `AppVersion` в
+  `PackageContents.xml` совпадает с версией Release.
+* В описании Release: таблица файлов, версия, commit SHA, дата сборки, конфигурация `Release / x64`,
+  платформа `AutoCAD 2020–2024 / .NET Framework 4.8`.
 * AutoCAD API берётся только из NuGet (`-p:UseInstalledAcad=false`). Если пакеты недоступны, шаг
   *Restore NuGet packages* завершается ошибкой с понятным сообщением.
 * Если сборка, тесты или проверки не прошли — Release не создаётся, ошибка видна во вкладке *Actions*.
@@ -555,7 +587,17 @@ Checkout → Restore NuGet (AutoCAD.NET 24.0.0) → Build Release / x64 → те
   ветки; для других веток собирается только артефакт workflow.
 
 Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) проверяет pull request'ы: собирает DLL и
-запускает тесты на Windows (.NET Framework 4.8 и .NET 8) и Linux (.NET 8).
+запускает тесты на Windows (.NET Framework 4.8 и .NET 8) и Linux (.NET 8), собирает те же архивы, проверяет их
+состав, на Windows выполняет `install.cmd` / повторную установку / `uninstall.cmd` во временный `%APPDATA%`, а на
+Linux — негативные проверки (`experiments/verify-release-package.py`). Локально (нужен PowerShell 7 или Windows
+PowerShell 5.1):
+
+```text
+dotnet build AutoCADHttp.sln -c Release
+pwsh scripts/package-release.ps1 -Version 0.0.0          # → package/
+pwsh scripts/test-release-package.ps1 -Version 0.0.0
+pwsh scripts/test-manual-install.ps1 -Version 0.0.0      # только Windows
+```
 
 ## Тесты
 
@@ -563,6 +605,7 @@ Workflow [`.github/workflows/build.yml`](.github/workflows/build.yml) прове
 на Linux — для net8.0). Проверяется:
 
 * `GET /ping` возвращает `200` и JSON `{"status":"ok","application":"AutoCAD","version":"2021"}`;
+* номер выпуска AutoCAD R23.1–R24.3 сопоставляется с годом 2020–2024 (`AcadReleaseTests`);
 * сервер не запускается сам по себе (только `Start()`), порт по умолчанию — `5000`, адрес — `127.0.0.1`;
 * после `Stop()` подключение к порту отклоняется (`ConnectionRefused`);
 * повторный `Start()` возвращает `AlreadyRunning`, не бросает исключений и не создаёт второй сервер;
@@ -588,11 +631,40 @@ dotnet run --project examples/StandaloneHost
 curl http://127.0.0.1:5000/ping
 ```
 
+## Ручная установка (AutoCAD 2020–2024)
+
+В каждом [Release](../../releases) есть архив `AcadHttpServer-manual-install-v<версия>.zip`. Он устанавливается
+**без прав администратора** — все файлы размещаются только в профиле пользователя (`%APPDATA%`):
+AutoCAD — `%APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle`, плагин загружается автоматически.
+
+```text
+AcadHttpServer-manual-install-v<версия>.zip
+├── install.cmd                копирует AppData\Roaming в %APPDATA% (настройки при обновлении сохраняются)
+├── uninstall.cmd              удаляет %APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle
+├── INSTALL.md                 подробная инструкция
+└── AppData\Roaming\Autodesk\ApplicationPlugins\AcadHttpServer.bundle
+    ├── PackageContents.xml    AutoCAD 2020–2024 (SeriesMin R23.1, SeriesMax R24.3), Win64, LoadOnAutoCADStartup
+    └── Contents\AutoCAD2020-2024
+        ├── AutoCADHttp.dll
+        └── AutoCADHttp.settings.json
+```
+
+1. Закрыть AutoCAD, разблокировать скачанный ZIP (*Свойства → Разблокировать*) и распаковать его.
+2. Запустить `install.cmd` (или вручную скопировать папку `AppData` архива в `%USERPROFILE%` со слиянием папок).
+3. Запустить AutoCAD 2020–2024 — плагин загрузится сам (`AutoCADHttp loaded (AutoCAD 2023)…` в командной строке).
+   При предупреждении безопасности выбрать «Всегда загружать» или добавить папку пакета в `TRUSTEDPATHS`.
+4. Выполнить `HTTPSTART` и открыть `http://127.0.0.1:5000/ping`.
+
+Настройки: `%APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle\Contents\AutoCAD2020-2024\AutoCADHttp.settings.json`
+(путь также выводит `HTTPSTATUS`). Обновление — повторить шаги 1–2 с новым архивом; удаление — `uninstall.cmd`.
+Полная инструкция — [`installer_manual/INSTALL.md`](installer_manual/INSTALL.md); описание пакета —
+[`installer_acad/PackageContents.xml`](installer_acad/PackageContents.xml).
+
 ## Загрузка в AutoCAD
 
 1. Собрать проект (или скачать `AutoCADHttp.zip` из последнего [Release](../../releases/latest) и распаковать).
    Оставить `AutoCADHttp.settings.json` рядом с DLL и при необходимости задать адрес, порт и каталог виджетов.
-2. Запустить AutoCAD 2021.
+2. Запустить AutoCAD 2020–2024.
 3. Выполнить:
 
 ```text
@@ -630,8 +702,8 @@ HTTPSTOP
   «Загрузить» или добавить папку с DLL в доверенные (`TRUSTEDPATHS`, *Параметры → Файлы → Надёжные расположения*).
 * Сборку, загруженную через `NETLOAD`, нельзя выгрузить без перезапуска AutoCAD (ограничение .NET Framework).
   Чтобы заменить DLL новой версией, закройте AutoCAD.
-* Для автозагрузки при старте AutoCAD можно использовать Autoloader (`ApplicationPlugins\*.bundle`) или
-  ключи реестра — сервер всё равно не будет запущен до команды `HTTPSTART`.
+* Для автозагрузки при старте AutoCAD используйте архив ручной установки (`AcadHttpServer.bundle`, см. выше) —
+  сервер всё равно не будет запущен до команды `HTTPSTART`. Не загружайте одновременно DLL из другой папки.
 
 ## Ограничения прототипа
 
@@ -671,9 +743,11 @@ HTTP-сервер предназначен только для локально�
 Что проверено автоматически (CI, без AutoCAD):
 
 * DLL собирается под .NET Framework 4.8 / x64 с официальными сборками AutoCAD 2021 API (NuGet 24.0.0);
+* архив ручной установки содержит корректный `AcadHttpServer.bundle` (`PackageContents.xml` для R23.1–R24.3 ссылается
+  на упакованную DLL), `install.cmd` / `uninstall.cmd` работают без прав администратора и сохраняют настройки;
 * HTTP-слой работает на .NET Framework 4.8 (рантайм AutoCAD 2021) — все требования к серверу покрыты тестами.
 
-Что требует ручной проверки в AutoCAD 2021 (в CI AutoCAD недоступен): `NETLOAD`, команды
+Что требует ручной проверки в AutoCAD 2020–2024 (в CI AutoCAD недоступен): автозагрузка `AcadHttpServer.bundle`, `NETLOAD`, команды
 `HTTPSTART` / `HTTPSTOP` / `HTTPSTATUS`, обработка IPC из idle и открытие локального виджета в Grist по инструкции выше.
 
 Выявленные ограничения и особенности:

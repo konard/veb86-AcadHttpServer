@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Autoloader manifest of AcadHttpServer.bundle (AutoCAD 2020-2024, x64).
+  Installed into %APPDATA%\Autodesk\ApplicationPlugins\AcadHttpServer.bundle by the manual-install archive.
+  AppVersion is replaced with the release version by scripts/package-release.ps1.
+  SeriesMin R23.1 = AutoCAD 2020, SeriesMax R24.3 = AutoCAD 2024 (R24.0 = 2021, R24.1 = 2022, R24.2 = 2023).
+  The plugin is loaded on AutoCAD startup; the HTTP server itself starts only with HTTPSTART.
+-->
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="AutoCAD" Name="AcadHttpServer" AppVersion="0.0.0" ProductCode="{33062c40-ad43-4f96-a17c-afa58a2ad0eb}" UpgradeCode="{6d0c4cc3-8be6-4034-bf27-daef9cc07971}" Description="Local HTTP server inside AutoCAD (HTTPSTART / HTTPSTOP / HTTPSTATUS)" Author="veb86" HelpFile="https://github.com/veb86/AcadHttpServer">
+  <CompanyDetails Name="veb86" Url="https://github.com/veb86/AcadHttpServer" />
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R23.1" SeriesMax="R24.3" />
+    <ComponentEntry AppName="AcadHttpServer" AppType=".Net" ModuleName="./Contents/AutoCAD2020-2024/AutoCADHttp.dll" AppDescription="Local HTTP server inside AutoCAD" LoadOnAutoCADStartup="True" LoadOnCommandInvocation="True">
+      <Commands GroupName="AcadHttpServer">
+        <Command Global="HTTPSTART" Local="HTTPSTART" />
+        <Command Global="HTTPSTOP" Local="HTTPSTOP" />
+        <Command Global="HTTPSTATUS" Local="HTTPSTATUS" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

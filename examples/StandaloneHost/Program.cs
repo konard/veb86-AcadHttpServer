@@ -16,6 +16,8 @@ namespace StandaloneHost
             string external = args.Length > 2 ? args[2] : Environment.GetEnvironmentVariable("ACADHTTP_EXTERNAL_IPC");
             Action<string> log = m => Console.WriteLine("[HTTP] " + m);
             var router = new ApiRouter("AutoCAD", "2021", widgetsDirectory: widgets);
+            if (settings.JsonView)
+                router.JsonView = json => log("IPC JSON: " + json);
             using (var outbox = string.IsNullOrWhiteSpace(external) ? null : new IpcOutbox(new Uri(external), log) { Verbose = true })
             using (var server = new LocalHttpServer(settings.Address, port, router.Handle, log) { Verbose = true })
             using (var stop = new CancellationTokenSource())

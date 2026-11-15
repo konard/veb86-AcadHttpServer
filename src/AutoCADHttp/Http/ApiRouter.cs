@@ -13,7 +13,17 @@ namespace AutoCADHttp.Http
 
         private readonly WidgetFiles _widgets;
 
+        // Keeps the JSONView output order identical to the Incoming queue order under concurrent requests.
+        private readonly object _jsonViewSync = new object();
+
         public ConcurrentQueue<IpcMessage> Incoming { get; private set; }
+
+        /// <summary>
+        /// Setting <c>JSONView = 1</c>: receives the original body of every accepted <c>POST /ipc</c> JSON
+        /// on the HTTP thread, before it is queued. Null (default) disables the output. The callback must
+        /// only queue the text (e.g. <c>CommandLineLog.Post</c>); its failures never change the HTTP response.
+        /// </summary>
+        public Action<string> JsonView { get; set; }
 
         public ApiRouter(string application, string version, ConcurrentQueue<IpcMessage> incoming = null, string widgetsDirectory = null)
         {
@@ -59,7 +69,17 @@ namespace AutoCADHttp.Http
                 {
                     return HttpResponseInfo.Json(400, "Bad Request", IpcMessage.ErrorJson(null, "INVALID_JSON"));
                 }
-                Incoming.Enqueue(message);
+                var jsonView = JsonView;
+                if (jsonView == null)
+                    Incoming.Enqueue(message);
+                else
+                {
+                    lock (_jsonViewSync)
+                    {
+                        try { jsonView(request.Body); } catch { }
+                        Incoming.Enqueue(message);
+                    }
+                }
                 return HttpResponseInfo.Json(202, "Accepted", IpcMessage.CreateResponse(message.Id, "{\"queued\":true}").Json);
             }
 

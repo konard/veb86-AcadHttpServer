@@ -15,6 +15,12 @@ namespace AutoCADHttp.Http
         public int Port { get; private set; }
         public string WidgetsDirectory { get; private set; }
 
+        /// <summary>
+        /// <c>JSONView</c>: when true every accepted <c>/ipc</c> JSON is also printed to the AutoCAD command line.
+        /// The file stores <c>0</c> (default, also when the field is omitted) or <c>1</c>.
+        /// </summary>
+        public bool JsonView { get; private set; }
+
         public static string FilePath
         {
             get { return Path.Combine(Path.GetDirectoryName(typeof(ServerSettings).Assembly.Location), FileName); }
@@ -77,6 +83,12 @@ namespace AutoCADHttp.Http
                         port < 1 || port > 65535)
                         throw new FormatException("port must be an integer from 1 to 65535.");
                     settings.Port = port;
+                }
+                if (root.Members.TryGetValue("JSONView", out field))
+                {
+                    if (field.Kind != "number" || (field.Raw != "0" && field.Raw != "1"))
+                        throw new FormatException("JSONView must be the integer 0 or 1.");
+                    settings.JsonView = field.Raw == "1";
                 }
                 if (root.Members.TryGetValue("widgetsDirectory", out field))
                 {

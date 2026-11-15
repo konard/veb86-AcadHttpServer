@@ -209,7 +209,8 @@ HTTP-поток только проверяет конверт и ставит �
 {
   "address": "127.0.0.1",
   "port": 5000,
-  "widgetsDirectory": "C:\\zcad\\GristWidgets\\widget"
+  "widgetsDirectory": "C:\\zcad\\GristWidgets\\widget",
+  "JSONView": 0
 }
 ```
 
@@ -219,6 +220,13 @@ HTTP-поток только проверяет конверт и ставит �
 * `widgetsDirectory` — абсолютный путь или путь относительно папки DLL, например `widgets`.
   В JSON обратные слеши Windows нужно удваивать; можно использовать `C:/zcad/GristWidgets/widget`.
   Пустая строка или `null` отключают статические ресурсы (`/widgets` возвращает `404`).
+* `JSONView` — `1`: каждый корректный JSON, принятый `POST /ipc`, дополнительно выводится в командную строку
+  AutoCAD без изменений (`[HTTP] IPC JSON: {...}`), в порядке постановки в очередь; `0` (по умолчанию, в том
+  числе если поле отсутствует) — не выводится. Допустимы только целые `0` и `1`, иное значение — ошибка
+  настроек, сервер не запускается. Некорректный JSON (ответ `400`) не выводится и в очередь не попадает.
+  Вывод идёт через очередь `CommandLineLog.Post()` и печатается в `Application.Idle`: HTTP-поток не
+  обращается к AutoCAD API и не ждёт вывода, ответы сервера и передача в `IpcDispatcher` одинаковы при `0` и `1`.
+  Текущее значение печатается при `HTTPSTART`. Не зависит от `ACADHTTP_VERBOSE` (журнал HTTP-запросов).
 
 Папка текущего чертежа, рабочая папка AutoCAD и расположение `acad.exe` не влияют на поиск файла или
 относительный путь виджетов. Сохраните файл как JSON в UTF-8. Путь настроек виден при загрузке плагина
@@ -381,6 +389,7 @@ Python нужен только для этого примера проверки
 dotnet build examples/StandaloneHost -c Release
 python3 experiments/verify-stage2.py
 python3 experiments/verify-settings.py
+python3 experiments/verify-jsonview.py
 ```
 
 Первая проверка также проверяет списки каталогов, явно указанные HTML-файлы, бинарное изображение и приём
@@ -388,6 +397,8 @@ python3 experiments/verify-settings.py
 Вторая запускает копию хоста с JSON рядом с DLL из другой рабочей папки и проверяет заданные адрес/порт,
 относительный каталог виджетов, IPC и отказ запуска при ошибке настроек. Консольный хост читает тот же JSON
 рядом с `StandaloneHost.dll`; его прежние аргументы порта, каталога и внешнего `/ipc` имеют приоритет.
+Третья проверяет `JSONView` = `1`, `0`, отсутствие поля и недопустимое значение: вывод исходного JSON по порядку
+только при `1`, отсутствие вывода некорректного JSON и одинаковые HTTP-ответы и обработку `PING`.
 
 ## Архитектура
 
@@ -444,7 +455,7 @@ src/AutoCADHttp/
   AutoCADHttp.csproj         net48, x64; ссылки на AcMgd/AcDbMgd/AcCoreMgd
   HttpServerPlugin.cs        IExtensionApplication + команды HTTPSTART/HTTPSTOP/HTTPSTATUS
   AcadRelease.cs             номер выпуска AutoCAD (R23.1…R24.3) → год 2020…2024 для /ping
-  AutoCADHttp.settings.json  адрес, порт и каталог виджетов; рядом с DLL в выходной папке
+  AutoCADHttp.settings.json  адрес, порт, каталог виджетов и JSONView; рядом с DLL в выходной папке
   CommandLineLog.cs          потокобезопасный вывод в командную строку (через Application.Idle)
   Http/LocalHttpServer.cs    HTTP-сервер на настроенном loopback-адресе (не зависит от AutoCAD)
   Http/ServerSettings.cs     чтение и проверка JSON относительно папки DLL

@@ -17,6 +17,8 @@
   <ItemGroup>
     <Compile Include="..\..\src\AutoCADHttp\Http\*.cs" Link="Http\%(Filename)%(Extension)" />
     <Compile Include="..\..\src\AutoCADHttp\AcadRelease.cs" Link="AcadRelease.cs" />
+    <!-- Shipped settings template, in a subfolder so it never configures the test assembly itself. -->
+    <None Include="..\..\src\AutoCADHttp\AutoCADHttp.settings.json" Link="template\AutoCADHttp.settings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

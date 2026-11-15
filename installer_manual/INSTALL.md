@@ -85,7 +85,7 @@ AutoCAD автоматически загружает пакеты из папк
 поэтому достаточно запустить AutoCAD.
 
 1. Запустите AutoCAD 2020–2024. В командной строке появится
-   `AutoCADHttp loaded. Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.`
+   `AutoCADHttp loaded (AutoCAD 2023). Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.` (год — версия запущенного AutoCAD)
 2. Если появится предупреждение безопасности о загрузке `AutoCADHttp.dll`, выберите **«Всегда загружать»**
    либо добавьте папку в доверенные пути (команда `OPTIONS` → «Файлы» → «Надёжные расположения» или
    системная переменная `TRUSTEDPATHS`):

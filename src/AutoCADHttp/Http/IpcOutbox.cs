@@ -28,12 +28,26 @@ namespace AutoCADHttp.Http
             _endpoint = endpoint;
             _log = log;
             _queue = new BlockingCollection<IpcMessage>(new ConcurrentQueue<IpcMessage>(), capacity);
-            // Never follow a redirect to an application endpoint outside /ipc.
-            _http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
+            _http = new HttpClient(handler ?? CreateDefaultHandler())
             {
                 Timeout = timeout ?? TimeSpan.FromSeconds(5)
             };
             Completion = Task.Run(SendLoopAsync);
+        }
+
+        // Never follow a redirect to an application endpoint outside /ipc. One connection per message: there are no
+        // retries, and reusing a pooled keep-alive connection that the peer is closing at that moment (always the case
+        // for HTTP/1.0 servers such as Python's http.server) fails the next message with "response ended prematurely".
+        private static HttpMessageHandler CreateDefaultHandler()
+        {
+#if NETCOREAPP
+            // SocketsHttpHandler pools the connection even when the request says "Connection: close";
+            // a zero lifetime closes it as soon as the response is finished.
+            return new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false, PooledConnectionLifetime = TimeSpan.Zero };
+#else
+            // .NET Framework: Connection: close (set per request) maps to HttpWebRequest.KeepAlive = false.
+            return new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false };
+#endif
         }
 
         internal const string EndpointRequirement = "External endpoint must be an absolute HTTP(S) URL ending in /ipc.";
@@ -96,6 +110,18 @@ namespace AutoCADHttp.Http
             }
         }
 
+        // HttpRequestException hides the socket reason ("Connection refused/reset") in inner exceptions.
+        private static string Describe(Exception ex)
+        {
+            string text = ex.Message;
+            for (Exception inner = ex.InnerException; inner != null; inner = inner.InnerException)
+            {
+                if (!string.IsNullOrEmpty(inner.Message) && text.IndexOf(inner.Message, StringComparison.Ordinal) < 0)
+                    text += " (" + inner.Message + ")";
+            }
+            return text;
+        }
+
         private async Task SendLoopAsync()
         {
             try
@@ -106,11 +132,14 @@ namespace AutoCADHttp.Http
                     {
                         using (var content = new StringContent(message.Json, Encoding.UTF8, "application/json"))
                         using (var request = new HttpRequestMessage(HttpMethod.Post, _endpoint) { Content = content })
-                        using (var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _stop.Token).ConfigureAwait(false))
                         {
-                            response.EnsureSuccessStatusCode();
-                            if (Verbose)
-                                Log("IPC outgoing " + message.Id + " -> " + (int)response.StatusCode);
+                            request.Headers.ConnectionClose = true; // see CreateDefaultHandler
+                            using (var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _stop.Token).ConfigureAwait(false))
+                            {
+                                response.EnsureSuccessStatusCode();
+                                if (Verbose)
+                                    Log("IPC outgoing " + message.Id + " -> " + (int)response.StatusCode);
+                            }
                         }
                     }
                     catch (OperationCanceledException)
@@ -121,7 +150,7 @@ namespace AutoCADHttp.Http
                     }
                     catch (Exception ex)
                     {
-                        Log("IPC outgoing " + message.Id + " failed at " + _endpoint + ": " + ex.Message);
+                        Log("IPC outgoing " + message.Id + " failed at " + _endpoint + ": " + Describe(ex));
                     }
                     // No automatic retry: a timed-out command might already have been executed by the peer.
                 }

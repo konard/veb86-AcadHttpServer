@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AutoCADHttp.Http;
@@ -132,6 +135,91 @@ namespace AutoCADHttp.Tests
                 await outbox.Completion;
             }
             Assert.False(outbox.TryEnqueue(IpcMessage.CreateResponse("stopped")));
+        }
+
+        // Regression: an HTTP/1.0 peer (e.g. Python's http.server) answers and then closes the connection. With pooled
+        // keep-alive connections the next message could be written to that closing connection and was lost with
+        // "The response ended prematurely" (no retries). The peer below waits before closing so that any reuse fails.
+        [Fact]
+        public async Task BackToBackMessages_ToAnHttp10PeerThatClosesAfterEachResponse_AreAllDelivered()
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var received = new ConcurrentQueue<string>();
+            var log = new ConcurrentQueue<string>();
+            var connections = 0;
+            Task accept = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    TcpClient client;
+                    try { client = await listener.AcceptTcpClientAsync(); }
+                    catch (Exception) { return; }
+                    Interlocked.Increment(ref connections);
+                    var _ = Task.Run(async () =>
+                    {
+                        using (client)
+                        {
+                            var stream = client.GetStream();
+                            string request = await ReadRequest(stream);
+                            if (request == null)
+                                return;
+                            received.Enqueue(request.Substring(request.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4));
+                            byte[] answer = Encoding.ASCII.GetBytes("HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+                            await stream.WriteAsync(answer, 0, answer.Length);
+                            await Task.Delay(300);
+                        }
+                    });
+                }
+            });
+            var outbox = new IpcOutbox(new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/ipc"),
+                                       log.Enqueue);
+            try
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    Assert.True(outbox.TryEnqueue(IpcMessage.CreateEvent("m" + i, "BURST")));
+                    Assert.True(outbox.TryEnqueue(IpcMessage.CreateEvent("n" + i, "BURST")));
+                }
+                await HttpTestHelpers.WaitFor(() => received.Count == 6);
+                Assert.Empty(log);
+                Assert.Equal(6, Volatile.Read(ref connections));
+                Assert.Equal(new[] { "m0", "n0", "m1", "n1", "m2", "n2" }, received.Select(b => IpcMessage.Parse(b).Id).ToArray());
+            }
+            finally
+            {
+                outbox.Dispose();
+                await outbox.Completion;
+                listener.Stop();
+                await accept;
+            }
+        }
+
+        // Reads one request with a Content-Length body; null if the client closed the connection first.
+        private static async Task<string> ReadRequest(NetworkStream stream)
+        {
+            var data = new StringBuilder();
+            var buffer = new byte[4096];
+            while (true)
+            {
+                string text = data.ToString();
+                int end = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                if (end >= 0)
+                {
+                    int length = 0;
+                    foreach (string line in text.Substring(0, end).Split(new[] { "\r\n" }, StringSplitOptions.None))
+                    {
+                        if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                            length = int.Parse(line.Substring(15).Trim());
+                    }
+                    if (Encoding.UTF8.GetByteCount(text) - Encoding.UTF8.GetByteCount(text.Substring(0, end + 4)) >= length)
+                        return text;
+                }
+                int read = await stream.ReadAsync(buffer, 0, buffer.Length);
+                if (read == 0)
+                    return null;
+                data.Append(Encoding.UTF8.GetString(buffer, 0, read));
+            }
         }
 
         [Theory]

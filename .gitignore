@@ -8,3 +8,4 @@ artifacts/
 ci-logs/
 __pycache__/
 *.pyc
+package/

@@ -18,7 +18,8 @@ namespace AutoCADHttp
     public sealed class HttpServerPlugin : IExtensionApplication
     {
         public const string AppName = "AutoCAD";
-        public const string ApplicationVersion = "2021";
+        /// <summary>Year of the running AutoCAD (2020-2024) reported by GET /ping; must be initialized before Router.</summary>
+        public static readonly string ApplicationVersion = DetectApplicationVersion();
 
         private static ApiRouter Router = new ApiRouter(AppName, ApplicationVersion);
         private static readonly IpcDispatcher CommandDispatcher = CreateDispatcher();
@@ -54,7 +55,7 @@ namespace AutoCADHttp
         {
             CommandLineLog.Attach();
             Application.Idle += OnIdle;
-            CommandLineLog.Write("AutoCADHttp loaded. Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.");
+            CommandLineLog.Write("AutoCADHttp loaded (AutoCAD " + ApplicationVersion + "). Commands: HTTPSTART, HTTPSTOP, HTTPSTATUS.");
             CommandLineLog.Write("Settings: " + ServerSettings.FilePath + " (read on HTTPSTART).");
         }
 
@@ -175,6 +176,18 @@ namespace AutoCADHttp
             {
                 CommandLineLog.Post("ERROR: invalid widgets directory: " + ex.Message);
                 return new ApiRouter(AppName, ApplicationVersion, Router.Incoming);
+            }
+        }
+
+        private static string DetectApplicationVersion()
+        {
+            try
+            {
+                return AcadRelease.YearName(Application.Version);
+            }
+            catch (System.Exception)
+            {
+                return AcadRelease.Fallback;
             }
         }
 

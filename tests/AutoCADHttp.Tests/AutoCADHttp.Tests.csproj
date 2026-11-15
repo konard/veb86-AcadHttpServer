@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\..\src\AutoCADHttp\Http\*.cs" Link="Http\%(Filename)%(Extension)" />
+    <Compile Include="..\..\src\AutoCADHttp\AcadRelease.cs" Link="AcadRelease.cs" />
   </ItemGroup>
 
   <ItemGroup>

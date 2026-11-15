@@ -21,10 +21,8 @@ namespace AutoCADHttp.Http
         public IpcOutbox(Uri endpoint, Action<string> log = null, TimeSpan? timeout = null,
                          HttpMessageHandler handler = null, int capacity = 1024)
         {
-            if (endpoint == null || !endpoint.IsAbsoluteUri ||
-                (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
-                endpoint.AbsolutePath != "/ipc" || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
-                throw new ArgumentException("External endpoint must be an absolute HTTP(S) URL ending in /ipc.", "endpoint");
+            if (!IsValidEndpoint(endpoint))
+                throw new ArgumentException(EndpointRequirement, "endpoint");
             if (capacity <= 0)
                 throw new ArgumentOutOfRangeException("capacity");
             _endpoint = endpoint;
@@ -38,6 +36,28 @@ namespace AutoCADHttp.Http
             Completion = Task.Run(SendLoopAsync);
         }
 
+        internal const string EndpointRequirement = "External endpoint must be an absolute HTTP(S) URL ending in /ipc.";
+
+        /// <summary>Absolute <c>http</c>/<c>https</c> URL whose path is exactly <c>/ipc</c>, without query or fragment.</summary>
+        public static bool IsValidEndpoint(Uri endpoint)
+        {
+            return endpoint != null && endpoint.IsAbsoluteUri &&
+                   (endpoint.Scheme == "http" || endpoint.Scheme == "https") &&
+                   endpoint.AbsolutePath == "/ipc" && endpoint.Query.Length == 0 && endpoint.Fragment.Length == 0;
+        }
+
+        /// <summary>Parses and validates an external <c>/ipc</c> URL (settings or environment).</summary>
+        public static bool TryParseEndpoint(string text, out Uri endpoint)
+        {
+            endpoint = null;
+            Uri parsed;
+            if (string.IsNullOrWhiteSpace(text) || !Uri.TryCreate(text.Trim(), UriKind.Absolute, out parsed) || !IsValidEndpoint(parsed))
+                return false;
+            endpoint = parsed;
+            return true;
+        }
+
+        public Uri Endpoint { get { return _endpoint; } }
         public Task Completion { get; private set; }
         public bool Verbose { get; set; }
         public int PendingCount

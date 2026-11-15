@@ -1,6 +1,5 @@
 using System;
 using System.Globalization;
-using System.Threading;
 using System.Net.Sockets;
 using Autodesk.AutoCAD.Runtime;
 using AutoCADHttp.Http;
@@ -21,23 +20,25 @@ namespace AutoCADHttp
         /// <summary>Year of the running AutoCAD (2020-2024) reported by GET /ping; must be initialized before Router.</summary>
         public static readonly string ApplicationVersion = DetectApplicationVersion();
 
-        private static ApiRouter Router = new ApiRouter(AppName, ApplicationVersion);
-        private static readonly IpcDispatcher CommandDispatcher = CreateDispatcher();
-        private static IpcOutbox _outbox;
+        // The single IPC service of the AutoCAD process: one incoming queue, one dispatcher, one outgoing transport.
+        // It exists independently of HTTPSTART/HTTPSTOP, so modules may register before the server starts.
+        private static readonly IpcService Service = CreateService();
+        private static ApiRouter Router = new ApiRouter(AppName, ApplicationVersion, Service.Incoming);
 
-        /// <summary>Register application handlers / subscribe to responses and events on the AutoCAD main thread.</summary>
-        public static IpcDispatcher Dispatcher { get { return CommandDispatcher; } }
+        /// <summary>
+        /// The public IPC service shared by all AutoCAD modules. Modules register commands / subscribe to events
+        /// (dispose the results on unload), send commands and publish events through it; they never create HTTP
+        /// servers, clients or queues of their own.
+        /// </summary>
+        public static IIpcService Ipc { get { return Service; } }
 
-        /// <summary>Queue an application command, response or event without waiting for HTTP.</summary>
+        /// <summary>Compatibility: the single dispatcher behind <see cref="Ipc"/>.</summary>
+        public static IpcDispatcher Dispatcher { get { return Service.Dispatcher; } }
+
+        /// <summary>Compatibility: same as <c>Ipc.TrySend</c> - queue a command, response or event without waiting for HTTP.</summary>
         public static bool QueueOutgoing(IpcMessage message)
         {
-            if (message == null)
-                throw new ArgumentNullException("message");
-            var outbox = Volatile.Read(ref _outbox);
-            if (outbox != null)
-                return outbox.TryEnqueue(message);
-            CommandLineLog.Post("IPC outgoing " + message.Id + " unavailable: start the server with ACADHTTP_EXTERNAL_IPC configured.");
-            return false;
+            return Service.TrySend(message);
         }
 
         // One server per AutoCAD process (shared by all open drawings).
@@ -64,7 +65,8 @@ namespace AutoCADHttp
             // AutoCAD is shutting down: release the port, do not touch the editor.
             try { Application.Idle -= OnIdle; } catch { }
             try { Server.Stop(); } catch { }
-            try { StopOutbox(); } catch { }
+            // Stops the transport, fails pending SendCommandAsync calls and releases every registration.
+            try { Service.Dispose(); } catch { }
             try { CommandLineLog.Detach(); } catch { }
         }
 
@@ -101,7 +103,7 @@ namespace AutoCADHttp
                 Router = router;
                 Server = server;
                 Server.Start();
-                StartOutbox();
+                StartOutbox(settings);
                 CommandLineLog.Write("IPC: " + BaseUrl() + "ipc; widgets: " + BaseUrl() + "widgets/");
                 CommandLineLog.Write("Server started: " + BaseUrl() + " (test: " + BaseUrl() + "ping)");
             }
@@ -126,8 +128,11 @@ namespace AutoCADHttp
         {
             try
             {
-                StopOutbox();
-                if (Server.Stop())
+                // Order: stop accepting HTTP, then the outgoing transport (fails pending SendCommandAsync).
+                // Module registrations are kept for the next HTTPSTART.
+                bool stopped = Server.Stop();
+                Service.StopTransport("IPC transport stopped by HTTPSTOP.");
+                if (stopped)
                     CommandLineLog.Write("Server stopped. Port " + Server.Port + " released.");
                 else
                     CommandLineLog.Write("Server is not running.");
@@ -158,9 +163,12 @@ namespace AutoCADHttp
                     CommandLineLog.Write("URL: " + BaseUrl() + "ping");
                 }
 
-                CommandLineLog.Write("Incoming IPC queued: " + Router.Incoming.Count);
-                var outbox = Volatile.Read(ref _outbox);
-                CommandLineLog.Write("Outgoing IPC: " + (outbox == null ? "DISABLED" : "RUNNING (queued: " + outbox.PendingCount + ")"));
+                CommandLineLog.Write("Incoming IPC queued: " + Service.Incoming.Count);
+                CommandLineLog.Write("Outgoing IPC: " + (!Service.IsTransportRunning ? "DISABLED" :
+                    "RUNNING " + Service.ExternalEndpoint + " (queued: " + Service.OutgoingQueued + ")"));
+                CommandLineLog.Write("IPC commands registered: " + Service.Dispatcher.CommandCount +
+                                     "; event subscriptions: " + Service.Dispatcher.SubscriptionCount +
+                                     "; commands awaiting responses: " + Service.PendingCommandCount);
                 CommandLineLog.Write("Requests served: " + Server.RequestCount.ToString(CultureInfo.InvariantCulture));
                 if (!string.IsNullOrEmpty(Server.LastError))
                     CommandLineLog.Write("Last error: " + Server.LastError);
@@ -175,12 +183,12 @@ namespace AutoCADHttp
         {
             try
             {
-                return new ApiRouter(AppName, ApplicationVersion, Router.Incoming, widgetsDirectory);
+                return new ApiRouter(AppName, ApplicationVersion, Service.Incoming, widgetsDirectory);
             }
             catch (System.Exception ex)
             {
                 CommandLineLog.Post("ERROR: invalid widgets directory: " + ex.Message);
-                return new ApiRouter(AppName, ApplicationVersion, Router.Incoming);
+                return new ApiRouter(AppName, ApplicationVersion, Service.Incoming);
             }
         }
 
@@ -196,44 +204,54 @@ namespace AutoCADHttp
             }
         }
 
-        private static IpcDispatcher CreateDispatcher()
+        private static IpcService CreateService()
         {
-            var dispatcher = new IpcDispatcher(Router.Incoming, m => QueueOutgoing(m), CommandLineLog.Post);
-            // A transport demonstration only. Future drawing handlers belong in the application layer.
-            dispatcher.Register("PING", m => IpcMessage.CreateResponse(m.Id));
-            return dispatcher;
+            var service = new IpcService(CommandLineLog.Post);
+            // A transport demonstration only. Drawing handlers belong in the modules that own them.
+            service.RegisterCommand(IpcDispatcher.ApplicationModule, "PING", m => IpcMessage.CreateResponse(m.Id));
+            return service;
         }
 
         private static void OnIdle(object sender, EventArgs e)
         {
-            if (Server.IsRunning)
-                CommandDispatcher.Drain();
+            // AutoCAD main thread: bounded, so a continuous stream of messages cannot block AutoCAD.
+            try
+            {
+                if (Server.IsRunning)
+                    Service.Drain(32);
+            }
+            catch
+            {
+                // Never let an exception escape from an AutoCAD event handler.
+            }
         }
 
-        private static void StartOutbox()
+        private static void StartOutbox(ServerSettings settings)
         {
-            string endpoint = Environment.GetEnvironmentVariable("ACADHTTP_EXTERNAL_IPC");
-            if (string.IsNullOrWhiteSpace(endpoint))
+            Service.StopTransport("IPC transport restarted.");
+            if (settings.ExternalIpc == null)
             {
-                CommandLineLog.Write("IPC outgoing disabled: set ACADHTTP_EXTERNAL_IPC to the external /ipc URL.");
+                CommandLineLog.Write("IPC outgoing disabled: set externalIpc in " + ServerSettings.FileName + " or " +
+                                     ServerSettings.ExternalIpcVariable + " to the external /ipc URL.");
+                return;
+            }
+            Uri endpoint;
+            if (!IpcOutbox.TryParseEndpoint(settings.ExternalIpc, out endpoint))
+            {
+                // Misconfigured/unavailable external transport must never disable the incoming HTTP server.
+                CommandLineLog.Write("ERROR: cannot configure outgoing IPC from " + settings.ExternalIpcSource + " ('" +
+                                     settings.ExternalIpc + "'): must be an absolute HTTP(S) URL with the path /ipc. Outgoing IPC disabled.");
                 return;
             }
             try
             {
-                Volatile.Write(ref _outbox, new IpcOutbox(new Uri(endpoint), CommandLineLog.Post) { Verbose = Server.Verbose });
+                Service.StartTransport(new IpcOutbox(endpoint, CommandLineLog.Post) { Verbose = Server.Verbose });
+                CommandLineLog.Write("IPC outgoing: " + endpoint + " (from " + settings.ExternalIpcSource + ").");
             }
             catch (System.Exception ex)
             {
-                // Misconfigured/unavailable external transport must never disable the incoming HTTP server.
                 CommandLineLog.Write("ERROR: cannot configure outgoing IPC: " + ex.Message);
             }
-        }
-
-        private static void StopOutbox()
-        {
-            var outbox = Interlocked.Exchange(ref _outbox, null);
-            if (outbox != null)
-                outbox.Dispose();
         }
 
         private static string BaseUrl()

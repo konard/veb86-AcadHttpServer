@@ -96,7 +96,8 @@ jobs:
           dotnet build examples/StandaloneHost -c Release
           python3 experiments/verify-stage2.py
           python3 experiments/verify-settings.py
-        timeout-minutes: 2
+          python3 experiments/verify-ipc-service.py
+        timeout-minutes: 4
 
       - name: Release archives layout (AcadHttpServer.bundle, PackageContents.xml) + negative checks
         run: |

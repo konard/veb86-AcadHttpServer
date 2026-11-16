@@ -67,8 +67,79 @@ namespace AutoCADHttp.Tests
             // AppContext.BaseDirectory: on net48 xUnit shadow-copies the assembly without content files.
             string template = Path.Combine(AppContext.BaseDirectory, "template", ServerSettings.FileName);
             File.Copy(template, SettingsPath);
-            var settings = ServerSettings.LoadFromDirectory(_directory);
+            var settings = ServerSettings.LoadFromDirectory(_directory, name => null);
             Assert.False(settings.JsonView);
+            Assert.Equal(5000, settings.Port);
+            // The template documents externalIpc but leaves outgoing IPC disabled.
+            Assert.Contains("\"externalIpc\"", File.ReadAllText(template));
+            Assert.Null(settings.ExternalIpc);
+            Assert.Null(settings.ExternalIpcSource);
+        }
+
+        [Theory]
+        [InlineData("http://127.0.0.1:5001/ipc", "http://127.0.0.1:5001/ipc")]
+        [InlineData("https://localhost:5443/ipc", "https://localhost:5443/ipc")]
+        [InlineData("  http://127.0.0.1:5001/ipc  ", "http://127.0.0.1:5001/ipc")]
+        public void ExternalIpc_IsReadFromJson(string value, string expected)
+        {
+            File.WriteAllText(SettingsPath, "{\"port\":5050,\"externalIpc\":\"" + value + "\"}", new UTF8Encoding(false));
+            var settings = ServerSettings.LoadFromDirectory(_directory, name => null);
+            Assert.Equal(expected, settings.ExternalIpc);
+            Assert.Equal(ServerSettings.FileName, settings.ExternalIpcSource);
+            // Other settings are unchanged by the new field.
+            Assert.Equal(5050, settings.Port);
+            Assert.Equal(IPAddress.Loopback, settings.Address);
+        }
+
+        [Theory]
+        [InlineData("{}")]
+        [InlineData("{\"externalIpc\":\"\"}")]
+        [InlineData("{\"externalIpc\":\"   \"}")]
+        [InlineData("{\"externalIpc\":null}")]
+        public void MissingOrEmptyExternalIpc_DisablesOutgoingOnly(string json)
+        {
+            File.WriteAllText(SettingsPath, json, new UTF8Encoding(false));
+            var settings = ServerSettings.LoadFromDirectory(_directory, name => null);
+            Assert.Null(settings.ExternalIpc);
+            Assert.Null(settings.ExternalIpcSource);
+            Assert.Equal(5000, settings.Port);
+        }
+
+        [Theory]
+        [InlineData("{\"externalIpc\":\"http://127.0.0.1:5001/ipc\"}")]
+        [InlineData("{\"externalIpc\":\"\"}")]
+        [InlineData("{}")]
+        public void EnvironmentVariable_HasPriorityOverJson(string json)
+        {
+            File.WriteAllText(SettingsPath, json, new UTF8Encoding(false));
+            string requested = null;
+            var settings = ServerSettings.LoadFromDirectory(_directory, name =>
+            {
+                requested = name;
+                return " http://127.0.0.1:6001/ipc ";
+            });
+            Assert.Equal("ACADHTTP_EXTERNAL_IPC", requested);
+            Assert.Equal("http://127.0.0.1:6001/ipc", settings.ExternalIpc);
+            Assert.Equal(ServerSettings.ExternalIpcVariable, settings.ExternalIpcSource);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("  ")]
+        public void BlankEnvironmentVariable_KeepsJsonValue(string environment)
+        {
+            File.WriteAllText(SettingsPath, "{\"externalIpc\":\"http://127.0.0.1:5001/ipc\"}", new UTF8Encoding(false));
+            var settings = ServerSettings.LoadFromDirectory(_directory, name => environment);
+            Assert.Equal("http://127.0.0.1:5001/ipc", settings.ExternalIpc);
+            Assert.Equal(ServerSettings.FileName, settings.ExternalIpcSource);
+        }
+
+        [Fact]
+        public void EnvironmentVariable_IsUsedWithoutSettingsFile()
+        {
+            var settings = ServerSettings.LoadFromDirectory(_directory, name => "http://127.0.0.1:6001/ipc");
+            Assert.Equal("http://127.0.0.1:6001/ipc", settings.ExternalIpc);
             Assert.Equal(5000, settings.Port);
         }
 
@@ -136,6 +207,13 @@ namespace AutoCADHttp.Tests
         [InlineData("{\"JSONView\":true}", "JSONView")]
         [InlineData("{\"JSONView\":null}", "JSONView")]
         [InlineData("{\"widgetsDirectory\":\"bad\\u0000path\"}", "widgetsDirectory")]
+        [InlineData("{\"externalIpc\":5001}", "externalIpc")]
+        [InlineData("{\"externalIpc\":true}", "externalIpc")]
+        [InlineData("{\"externalIpc\":\"127.0.0.1:5001/ipc\"}", "externalIpc")]
+        [InlineData("{\"externalIpc\":\"/ipc\"}", "externalIpc")]
+        [InlineData("{\"externalIpc\":\"ftp://127.0.0.1:5001/ipc\"}", "externalIpc")]
+        [InlineData("{\"externalIpc\":\"http://127.0.0.1:5001/api\"}", "externalIpc")]
+        [InlineData("{\"externalIpc\":\"http://127.0.0.1:5001/ipc?x=1\"}", "externalIpc")]
         public void InvalidSettings_ReportFileAndReason(string json, string reason)
         {
             var error = Assert.Throws<FormatException>(() => Load(json));

@@ -11,6 +11,9 @@ namespace AutoCADHttp.Http
     {
         public const string FileName = "AutoCADHttp.settings.json";
 
+        /// <summary>Environment variable that overrides <c>externalIpc</c> (kept for compatibility).</summary>
+        public const string ExternalIpcVariable = "ACADHTTP_EXTERNAL_IPC";
+
         public IPAddress Address { get; private set; }
         public int Port { get; private set; }
         public string WidgetsDirectory { get; private set; }
@@ -20,6 +23,17 @@ namespace AutoCADHttp.Http
         /// The file stores <c>0</c> (default, also when the field is omitted) or <c>1</c>.
         /// </summary>
         public bool JsonView { get; private set; }
+
+        /// <summary>
+        /// Effective external <c>/ipc</c> URL for outgoing messages, or null when outgoing IPC is not configured.
+        /// <c>ACADHTTP_EXTERNAL_IPC</c>, when set, has priority over the optional JSON field <c>externalIpc</c>.
+        /// The JSON value is validated on load; the environment value is validated when the transport starts
+        /// (an invalid one only disables outgoing IPC, as before).
+        /// </summary>
+        public string ExternalIpc { get; private set; }
+
+        /// <summary>Where <see cref="ExternalIpc"/> comes from: the environment variable name, the file name, or null.</summary>
+        public string ExternalIpcSource { get; private set; }
 
         public static string FilePath
         {
@@ -33,6 +47,23 @@ namespace AutoCADHttp.Http
 
         /// <summary>Load from an assembly directory. Missing files/fields retain the existing defaults.</summary>
         public static ServerSettings LoadFromDirectory(string directory)
+        {
+            return LoadFromDirectory(directory, Environment.GetEnvironmentVariable);
+        }
+
+        internal static ServerSettings LoadFromDirectory(string directory, Func<string, string> environment)
+        {
+            ServerSettings settings = LoadFile(directory);
+            string external = environment(ExternalIpcVariable);
+            if (!string.IsNullOrWhiteSpace(external))
+            {
+                settings.ExternalIpc = external.Trim();
+                settings.ExternalIpcSource = ExternalIpcVariable;
+            }
+            return settings;
+        }
+
+        private static ServerSettings LoadFile(string directory)
         {
             directory = Path.GetFullPath(directory);
             string path = Path.Combine(directory, FileName);
@@ -89,6 +120,21 @@ namespace AutoCADHttp.Http
                     if (field.Kind != "number" || (field.Raw != "0" && field.Raw != "1"))
                         throw new FormatException("JSONView must be the integer 0 or 1.");
                     settings.JsonView = field.Raw == "1";
+                }
+                if (root.Members.TryGetValue("externalIpc", out field))
+                {
+                    Uri endpoint;
+                    if (field.Kind != "string" && field.Kind != "null")
+                        throw new FormatException("externalIpc must be a string or null.");
+                    // Empty/null: outgoing IPC is not configured; the incoming server still starts.
+                    if (!string.IsNullOrWhiteSpace(field.String))
+                    {
+                        if (!IpcOutbox.TryParseEndpoint(field.String, out endpoint))
+                            throw new FormatException("externalIpc must be an absolute HTTP(S) URL with the path /ipc, " +
+                                                      "for example http://127.0.0.1:5001/ipc.");
+                        settings.ExternalIpc = endpoint.AbsoluteUri;
+                        settings.ExternalIpcSource = FileName;
+                    }
                 }
                 if (root.Members.TryGetValue("widgetsDirectory", out field))
                 {

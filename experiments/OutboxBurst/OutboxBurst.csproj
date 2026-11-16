@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Experiment: burst IpcOutbox sends to an external /ipc (e.g. Python http.server) with System.Net tracing. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\src\AutoCADHttp\Http\*.cs" Link="Http\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

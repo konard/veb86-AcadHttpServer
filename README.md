@@ -224,10 +224,10 @@ HTTP-поток только проверяет конверт и ставит �
 * `widgetsDirectory` — абсолютный путь или путь относительно папки DLL, например `widgets`.
   В JSON обратные слеши Windows нужно удваивать; можно использовать `C:/zcad/GristWidgets/widget`.
   Пустая строка или `null` отключают статические ресурсы (`/widgets` возвращает `404`).
-* `JSONView` — `1`: каждый корректный JSON, принятый `POST /ipc`, дополнительно выводится в командную строку
-  AutoCAD без изменений (`[HTTP] IPC JSON: {...}`), в порядке постановки в очередь; `0` (по умолчанию, в том
+* `JSONView` — `1`: каждый JSON, пришедший на `/ipc`, — и корректный, и некорректный — дополнительно
+  выводится в командную строку AutoCAD без изменений, в порядке поступления; `0` (по умолчанию, в том
   числе если поле отсутствует) — не выводится. Допустимы только целые `0` и `1`, иное значение — ошибка
-  настроек, сервер не запускается. Некорректный JSON (ответ `400`) не выводится и в очередь не попадает.
+  настроек, сервер не запускается. Формат строк — см. [«Просмотр JSON (`JSONView`)»](#просмотр-json-jsonview).
   Вывод идёт через очередь `CommandLineLog.Post()` и печатается в `Application.Idle`: HTTP-поток не
   обращается к AutoCAD API и не ждёт вывода, ответы сервера и передача в `IpcDispatcher` одинаковы при `0` и `1`.
   Текущее значение печатается при `HTTPSTART`. Не зависит от `ACADHTTP_VERBOSE` (журнал HTTP-запросов).
@@ -310,10 +310,52 @@ Invoke-RestMethod http://127.0.0.1:5000/ipc -Method Post -ContentType 'applicati
 {"type":"response","status":"error","error":{"code":"INVALID_JSON"}}
 ```
 
+Чтобы увидеть, что именно пришло и почему оно отклонено, включите `JSONView` = `1` (см. ниже).
+
 Исключение обработчика превращается в коррелированный `COMMAND_FAILED`; следующие сообщения продолжают
 обрабатываться. `Content-Type` должен быть `application/json` (`415` иначе), тело — UTF-8 с
 `Content-Length` (`411` без длины). Chunked-запросы не поддерживаются (`400`), `Expect: 100-continue`
 поддерживается. Размер тела ограничен 1 MiB (`413`), глубина JSON — 32; тайм-аут входящего запроса — 5 с.
+
+#### Просмотр JSON (`JSONView`)
+
+При `JSONView` = `1` каждый запрос к `/ipc` печатается в командной строке одной записью — тело запроса
+выводится точно так, как оно получено (форматирование, порядок ключей, значения не меняются):
+
+```text
+[HTTP] IPC JSON: {"id":"1","type":"command","command":"PING","parameters":{}}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: Missing required field "parameters".): {"id":"2","type":"command","command":"PING"}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: Invalid IPC JSON at line 6, column 1 (offset 77): unexpected '}'.): {
+  "id": "3",
+  "type": "command",
+  "command": "PING",
+  "parameters": {},
+}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: parameters must be a JSON object, not string.): {"id":"4","type":"command","command":"PING","parameters":"{}"}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: Invalid IPC JSON at line 1, column 2 (offset 1): unexpected '''.): {'id':'5','type':'command','command':'PING','parameters':{}}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: Invalid IPC JSON at line 1, column 1 (offset 0): unexpected character U+FEFF.): ﻿{"id":"6","type":"command","command":"PING","parameters":{}}
+[HTTP] IPC JSON INVALID (400 INVALID_JSON: type must be "command", "response" or "event", not "request".): {"id":"7","type":"request","command":"PING","parameters":{}}
+[HTTP] IPC JSON INVALID (400 Bad Request: Request body must be UTF-8: invalid byte 0xCF at offset 23): {"id":"cp1251","text":"������"}
+[HTTP] IPC JSON INVALID (415 INVALID_CONTENT_TYPE: Content-Type is 'text/plain', use application/json): {"id":"1","type":"command","command":"PING","parameters":{}}
+[HTTP] IPC JSON INVALID (405 METHOD_NOT_ALLOWED: GET /ipc, use POST): <empty body>
+[HTTP] IPC JSON INVALID (413 Payload Too Large: Request body too large): <body not read>
+```
+
+* `IPC JSON: <тело>` — сообщение принято (`202`) и поставлено в очередь; строки идут в порядке очереди.
+* `IPC JSON INVALID (<HTTP-код> <код ошибки>: <причина>): <тело>` — сообщение отклонено и в очередь не
+  попало. Причина указывает, что исправить: отсутствующее или пустое поле и его неверный тип (`id`, `type`,
+  `command`/`event`, `parameters`, `status`, `result`, `error.code`), недопустимое значение `type`/`status`,
+  дублирующееся поле, а для синтаксической ошибки — строку, столбец, смещение и неожиданный символ (например,
+  BOM `U+FEFF`, перевод строки внутри строки, одинарные кавычки, лишняя запятая, данные после JSON).
+  Тело не в UTF-8 (например, Windows-1251) выводится с `U+FFFD` вместо неверных байтов и с первым неверным
+  байтом и его смещением (в примере — «Привет» в Windows-1251). BOM в начале тела не виден, но указан
+  в причине как `U+FEFF`. Если тело не было прочитано (`411`, `413`, чужой `Host` → `403`), вместо него —
+  `<body not read>`; пустое тело — `<empty body>`.
+
+HTTP-коды и коды ошибок в ответах (`INVALID_JSON`, `INVALID_CONTENT_TYPE`) от `JSONView` не зависят.
+Примеры выше получены скриптом `python3 experiments/jsonview-readme-samples.py` (после сборки `StandaloneHost`).
+В коде: `ApiRouter.JsonView` получает готовую строку; ошибки, найденные самим сервером до маршрутизации,
+передаются через `LocalHttpServer.RequestRejected = router.ReportRejected`.
 
 Исходящая очередь ограничена 1024 сообщениями. `TryEnqueue`/`QueueOutgoing` возвращает немедленно;
 переполнение или остановка даёт `false` и запись в журнал. Один фоновый consumer отправляет сообщения
@@ -469,8 +511,9 @@ python3 experiments/verify-ipc-service.py
 Вторая запускает копию хоста с JSON рядом с DLL из другой рабочей папки и проверяет заданные адрес/порт,
 относительный каталог виджетов, IPC и отказ запуска при ошибке настроек. Консольный хост читает тот же JSON
 рядом с `StandaloneHost.dll`; его прежние аргументы порта, каталога и внешнего `/ipc` имеют приоритет.
-Третья проверяет `JSONView` = `1`, `0`, отсутствие поля и недопустимое значение: вывод исходного JSON по порядку
-только при `1`, отсутствие вывода некорректного JSON и одинаковые HTTP-ответы и обработку `PING`.
+Третья проверяет `JSONView` = `1`, `0`, отсутствие поля и недопустимое значение: при `1` вывод исходного JSON
+по порядку — и принятого, и отклонённого с причиной (синтаксис, конверт, Windows-1251 вместо UTF-8, неверный
+`Content-Type`), при `0` и без поля — отсутствие вывода, а также одинаковые HTTP-ответы и обработку `PING`.
 Четвёртая проверяет общий IPC-сервис с двумя демонстрационными модулями и внешним приложением
 [`examples/external-ipc-app.py`](examples/external-ipc-app.py): отказ дублирующей регистрации, `SendCommandAsync` с
 ответом по тому же `id`, событие двум подписчикам без ответа, `UNKNOWN_COMMAND`, тайм-аут и немедленное завершение
@@ -708,6 +751,8 @@ pwsh scripts/test-manual-install.ps1 -Version 0.0.0      # только Windows
 * 50 параллельных запросов; 404 / 405 / 400 / 403; ошибка обработчика → `500` + сообщение в журнал;
 * сквозная проверка на реальном порту `127.0.0.1:5000`;
 * IPC command/response/event, валидация JSON, UTF-8 и фрагментация тела, 50 параллельных команд;
+* `JSONView`: вывод принятого и отклонённого JSON с причиной (поле, строка/столбец, неверный байт UTF-8),
+  порядок вывода, одинаковые ответы при `0` и `1`;
 * выполнение диспетчера в потоке вызывающего приложения, корреляция и изоляция ошибок;
 * исходящий HTTP на реальный локальный peer, тайм-аут/недоступность/HTTP-ошибка, ограничение очереди и отмена;
 * списки корневого/вложенного/пустого каталога, явный `index.html`, ссылки и экранирование имён;

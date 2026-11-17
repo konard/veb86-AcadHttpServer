@@ -144,6 +144,15 @@ namespace AutoCADHttp.Http
         public bool Verbose { get; set; }
 
         /// <summary>
+        /// Optional observer of requests the server rejects itself, without calling the handler: host not allowed,
+        /// body errors (no or invalid Content-Length, Transfer-Encoding, too large, incomplete, not UTF-8).
+        /// <see cref="HttpRequestInfo.Body"/> is null when the body was not read; a body that is not UTF-8 is
+        /// decoded with U+FFFD replacement characters. Called on the request thread before the response is sent;
+        /// it must not block, and its exceptions are ignored. Used for <c>JSONView</c> (<see cref="ApiRouter.ReportRejected"/>).
+        /// </summary>
+        public Action<HttpRequestInfo, HttpResponseInfo> RequestRejected { get; set; }
+
+        /// <summary>
         /// Starts listening on <see cref="Address"/>:<see cref="Port"/>. Calling it while the server is
         /// running does nothing and returns <see cref="StartResult.AlreadyRunning"/>.
         /// </summary>
@@ -297,12 +306,18 @@ namespace AutoCADHttp.Http
                         if (request == null)
                             response = HttpResponseInfo.JsonError(400, "Bad Request", "Bad request");
                         else if (!IsAllowedHost(request, Address))
+                        {
+                            request.Body = null;
                             response = HttpResponseInfo.JsonError(403, "Forbidden", "Host not allowed");
+                            NotifyRejected(request, response);
+                        }
                         else
                         {
                             response = await ReadBodyAsync(stream, request, head.Remainder).ConfigureAwait(false);
                             if (response == null)
                                 response = InvokeHandler(request);
+                            else
+                                NotifyRejected(request, response);
                         }
                     }
 
@@ -339,6 +354,15 @@ namespace AutoCADHttp.Http
         private static void CloseQuietly(TcpClient client)
         {
             try { client.Close(); } catch { }
+        }
+
+        private void NotifyRejected(HttpRequestInfo request, HttpResponseInfo response)
+        {
+            var observer = RequestRejected;
+            if (observer == null)
+                return;
+            try { observer(request, response); }
+            catch (Exception ex) { ReportError("RequestRejected observer failed: " + ex.GetType().Name + ": " + ex.Message); }
         }
 
         private HttpResponseInfo InvokeHandler(HttpRequestInfo request)
@@ -404,6 +428,8 @@ namespace AutoCADHttp.Http
 
         private static async Task<HttpResponseInfo> ReadBodyAsync(Stream stream, HttpRequestInfo request, byte[] remainder)
         {
+            string bodyless = request.Body;
+            request.Body = null; // Not read (yet): what RequestRejected sees for errors before the body.
             if (request.Headers.ContainsKey("Transfer-Encoding"))
                 return HttpResponseInfo.JsonError(400, "Bad Request", "Transfer-Encoding is not supported; use Content-Length");
             string lengthText;
@@ -411,6 +437,7 @@ namespace AutoCADHttp.Http
             {
                 if (request.Method == "POST")
                     return HttpResponseInfo.JsonError(411, "Length Required", "Content-Length required");
+                request.Body = bodyless;
                 return null;
             }
             long length;
@@ -433,15 +460,57 @@ namespace AutoCADHttp.Http
             {
                 int read = await stream.ReadAsync(body, total, body.Length - total).ConfigureAwait(false);
                 if (read == 0)
+                {
+                    request.Body = Encoding.UTF8.GetString(body, 0, total); // What did arrive, for RequestRejected.
                     return HttpResponseInfo.JsonError(400, "Bad Request", "Incomplete request body");
+                }
                 total += read;
             }
             try { request.Body = new UTF8Encoding(false, true).GetString(body); }
             catch (DecoderFallbackException)
             {
-                return HttpResponseInfo.JsonError(400, "Bad Request", "Request body must be UTF-8");
+                request.Body = Encoding.UTF8.GetString(body); // U+FFFD in place of the invalid bytes, for RequestRejected.
+                return HttpResponseInfo.JsonError(400, "Bad Request", "Request body must be UTF-8" + DescribeInvalidUtf8(body));
             }
             return null;
+        }
+
+        // E.g. ": invalid byte 0xCF at offset 25" - typically text sent in a legacy code page such as Windows-1251.
+        internal static string DescribeInvalidUtf8(byte[] body)
+        {
+            int offset = FindInvalidUtf8(body);
+            return offset < 0 ? "" : ": invalid byte 0x" + body[offset].ToString("X2", CultureInfo.InvariantCulture) +
+                                     " at offset " + offset.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Offset of the first byte that starts an invalid UTF-8 sequence (RFC 3629), or -1.</summary>
+        internal static int FindInvalidUtf8(byte[] bytes)
+        {
+            int i = 0;
+            while (i < bytes.Length)
+            {
+                byte c = bytes[i];
+                if (c < 0x80) { i++; continue; }
+                int need;
+                byte low = 0x80, high = 0xBF;
+                if (c >= 0xC2 && c <= 0xDF) need = 1;
+                else if (c == 0xE0) { need = 2; low = 0xA0; }
+                else if (c == 0xED) { need = 2; high = 0x9F; } // no UTF-16 surrogates
+                else if (c >= 0xE1 && c <= 0xEF) need = 2;
+                else if (c == 0xF0) { need = 3; low = 0x90; }
+                else if (c == 0xF4) { need = 3; high = 0x8F; } // not above U+10FFFF
+                else if (c >= 0xF1 && c <= 0xF3) need = 3;
+                else return i;
+                for (int k = 1; k <= need; k++)
+                {
+                    if (i + k >= bytes.Length || bytes[i + k] < low || bytes[i + k] > high)
+                        return i;
+                    low = 0x80;
+                    high = 0xBF;
+                }
+                i += need + 1;
+            }
+            return -1;
         }
 
         internal static HttpRequestInfo ParseRequestHead(string head)

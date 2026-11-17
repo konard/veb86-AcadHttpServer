@@ -178,6 +178,24 @@ namespace AutoCADHttp.Tests
                 return (int)response.StatusCode + " " + await response.Content.ReadAsStringAsync();
         }
 
+        private static string Shown(string body)
+        {
+            return ApiRouter.JsonViewPrefix + body;
+        }
+
+        private static async Task<string> SendIpcBytes(LocalHttpServer server, string contentType, byte[] body)
+        {
+            byte[] header = Encoding.ASCII.GetBytes("POST /ipc HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+                (contentType == null ? "" : "Content-Type: " + contentType + "\r\n") +
+                "Content-Length: " + body.Length + "\r\n\r\n");
+            return await HttpTestHelpers.SendRaw(server.Port, header.Concat(body).ToArray());
+        }
+
+        private static LocalHttpServer JsonViewServer(ApiRouter router)
+        {
+            return new LocalHttpServer(0, router.Handle, null) { RequestRejected = router.ReportRejected };
+        }
+
         [Theory]
         [InlineData(false)]
         [InlineData(true)]
@@ -187,7 +205,7 @@ namespace AutoCADHttp.Tests
             var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
             if (enabled)
                 router.JsonView = shown.Enqueue;
-            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var server = JsonViewServer(router))
             using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
             {
                 server.Start();
@@ -197,7 +215,7 @@ namespace AutoCADHttp.Tests
                 Assert.Equal(PingJson, queued.Json);
                 Assert.Equal("PING", queued.Command);
                 // JSON is shown byte-for-byte as received (formatting, key order and values untouched).
-                Assert.Equal(enabled ? new[] { PingJson } : new string[0], shown.ToArray());
+                Assert.Equal(enabled ? new[] { "IPC JSON: " + PingJson } : new string[0], shown.ToArray());
 
                 // The queued message reaches IpcDispatcher in both modes.
                 var results = new System.Collections.Generic.List<IpcMessage>();
@@ -215,13 +233,13 @@ namespace AutoCADHttp.Tests
             var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
             router.JsonView = shown.Enqueue;
             var sent = Enumerable.Range(1, 5).Select(i => IpcMessage.CreateCommand(i.ToString(), "PING").Json).ToArray();
-            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var server = JsonViewServer(router))
             using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
             {
                 server.Start();
                 foreach (string json in sent)
                     Assert.StartsWith("202 ", await PostIpc(http, server, json));
-                Assert.Equal(sent, shown.ToArray());
+                Assert.Equal(sent.Select(Shown).ToArray(), shown.ToArray());
                 Assert.Equal(sent, router.Incoming.Select(m => m.Json).ToArray());
             }
         }
@@ -232,50 +250,213 @@ namespace AutoCADHttp.Tests
             var router = new ApiRouter("AutoCAD", "2021");
             var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
             router.JsonView = shown.Enqueue;
-            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var server = JsonViewServer(router))
             using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
             {
                 server.Start();
                 await Task.WhenAll(Enumerable.Range(0, 50).Select(async i =>
                     Assert.StartsWith("202 ", await PostIpc(http, server, IpcMessage.CreateCommand(i.ToString(), "PING").Json))));
                 Assert.Equal(50, shown.Count);
-                Assert.Equal(router.Incoming.Select(m => m.Json).ToArray(), shown.ToArray());
+                Assert.Equal(router.Incoming.Select(m => m.Json).Select(Shown).ToArray(), shown.ToArray());
             }
         }
 
+        // Issue #17: JSONView = 1 shows incorrect JSON too - verbatim, with the reason - so the sender can be fixed.
+        // The HTTP response stays the same and nothing is queued.
         [Theory]
-        [InlineData("{")]
-        [InlineData("{}")]
-        [InlineData("{\"id\":\"1\",\"type\":\"unknown\"}")]
-        [InlineData("[]")]
-        public async Task JsonView_InvalidJson_IsNeitherShownNorQueued(string body)
+        [InlineData("{", "Invalid IPC JSON at line 1, column 2 (offset 1): unexpected end of JSON.")]
+        [InlineData("{}", "Missing required field \"id\".")]
+        [InlineData("[]", "IPC message must be a JSON object, not array.")]
+        [InlineData("{\"id\":\"1\",\"type\":\"unknown\"}", "type must be \"command\", \"response\" or \"event\", not \"unknown\".")]
+        [InlineData("{\"id\":1,\"type\":\"command\",\"command\":\"PING\",\"parameters\":{}}", "id must be a JSON string, not number.")]
+        [InlineData("{\"id\":\" \",\"type\":\"command\",\"command\":\"PING\",\"parameters\":{}}", "id must not be empty.")]
+        [InlineData("{\"id\":\"1\",\"type\":\"command\",\"command\":\"PING\"}", "Missing required field \"parameters\".")]
+        [InlineData("{\"id\":\"1\",\"type\":\"command\",\"command\":\"PING\",\"parameters\":\"{}\"}", "parameters must be a JSON object, not string.")]
+        [InlineData("{\"id\":\"1\",\"type\":\"response\",\"status\":\"error\",\"error\":{}}", "Missing required field \"error.code\".")]
+        [InlineData("{\"id\":\"1\",\"type\":\"response\",\"status\":\"done\"}", "status must be \"ok\" or \"error\", not \"done\".")]
+        [InlineData("{\"id\":\"1\",\"id\":\"2\"}", "Duplicate IPC JSON field: id")]
+        [InlineData("{\n  \"id\": \"1\",\n  \"type\": \"command\",\n  \"command\": \"PING\",\n  \"parameters\": {},\n}",
+                    "Invalid IPC JSON at line 6, column 1 (offset 77): unexpected '}'.")]
+        [InlineData("{'id':'1'}", "Invalid IPC JSON at line 1, column 2 (offset 1): unexpected '''.")]
+        [InlineData("﻿{\"id\":\"1\"}", "Invalid IPC JSON at line 1, column 1 (offset 0): unexpected character U+FEFF.")]
+        [InlineData("{\"id\":\"line\nbreak\"}", "Invalid IPC JSON at line 1, column 12 (offset 11): unexpected character U+000A.")]
+        [InlineData("{\"id\":\"1\"} {}", "Trailing data after IPC JSON at line 1, column 12 (offset 11): unexpected '{'.")]
+        [InlineData(" ", "IPC JSON is empty.")]
+        public async Task JsonView_InvalidJson_IsShownWithReason_AndNotQueued(string body, string reason)
         {
             var router = new ApiRouter("AutoCAD", "2021");
             var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
             router.JsonView = shown.Enqueue;
-            using (var server = new LocalHttpServer(0, router.Handle, null))
+            using (var server = JsonViewServer(router))
             using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
             {
                 server.Start();
                 Assert.Equal("400 " + IpcMessage.ErrorJson(null, "INVALID_JSON"),
                     await PostIpc(http, server, body));
-                Assert.Empty(shown);
+                Assert.Equal(new[] { "IPC JSON INVALID (400 INVALID_JSON: " + reason + "): " + body }, shown.ToArray());
                 Assert.Empty(router.Incoming);
             }
         }
 
         [Fact]
-        public void JsonView_WrongContentTypeOrMethod_IsNotShown()
+        public async Task JsonView_ValidAndInvalidJson_AreShownInArrivalOrder()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            string first = IpcMessage.CreateCommand("1", "PING").Json, second = IpcMessage.CreateCommand("2", "PING").Json;
+            using (var server = JsonViewServer(router))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                Assert.StartsWith("202 ", await PostIpc(http, server, first));
+                Assert.StartsWith("400 ", await PostIpc(http, server, "{\"id\":\"x\"}"));
+                Assert.StartsWith("202 ", await PostIpc(http, server, second));
+                Assert.Equal(new[]
+                {
+                    "IPC JSON: " + first,
+                    "IPC JSON INVALID (400 INVALID_JSON: Missing required field \"type\".): {\"id\":\"x\"}",
+                    "IPC JSON: " + second
+                }, shown.ToArray());
+                Assert.Equal(new[] { "1", "2" }, router.Incoming.Select(m => m.Id).ToArray());
+            }
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public async Task JsonView_InvalidJson_ResponsesAreIdenticalWithAndWithoutJsonView(bool enabled)
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            if (enabled)
+                router.JsonView = shown.Enqueue;
+            using (var server = JsonViewServer(router))
+            using (var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+            {
+                server.Start();
+                Assert.Equal("400 " + IpcMessage.ErrorJson(null, "INVALID_JSON"), await PostIpc(http, server, "{"));
+                string raw = await SendIpcBytes(server, "application/json", new byte[] { (byte)'{', 0xCF });
+                Assert.StartsWith("HTTP/1.1 400 Bad Request", raw);
+                Assert.EndsWith("{\"status\":\"error\",\"error\":\"Request body must be UTF-8: invalid byte 0xCF at offset 1\"}", raw);
+                Assert.Equal(enabled ? 2 : 0, shown.Count);
+                Assert.Empty(router.Incoming);
+            }
+        }
+
+        [Fact]
+        public void JsonView_WrongContentTypeOrMethod_IsShownWithReason()
         {
             var router = new ApiRouter("AutoCAD", "2021");
             var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
             router.JsonView = shown.Enqueue;
             string json = IpcMessage.CreateCommand("1", "PING").Json;
-            var text = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "text/plain" } };
+            var text = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "text/plain; charset=utf-8" } };
             Assert.Equal(415, router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", text, json)).StatusCode);
+            var none = new System.Collections.Generic.Dictionary<string, string>();
+            Assert.Equal(415, router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", none, json)).StatusCode);
             var jsonType = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "application/json" } };
             Assert.Equal(405, router.Handle(new HttpRequestInfo("PUT", "/ipc", "HTTP/1.1", jsonType, json)).StatusCode);
-            Assert.Empty(shown);
+            Assert.Equal(405, router.Handle(new HttpRequestInfo("GET", "/ipc", "HTTP/1.1", none)).StatusCode);
+            // Other paths are not IPC and are never shown.
+            Assert.Equal(405, router.Handle(new HttpRequestInfo("POST", "/ping", "HTTP/1.1", jsonType, json)).StatusCode);
+            Assert.Equal(new[]
+            {
+                "IPC JSON INVALID (415 INVALID_CONTENT_TYPE: Content-Type is 'text/plain; charset=utf-8', use application/json): " + json,
+                "IPC JSON INVALID (415 INVALID_CONTENT_TYPE: no Content-Type header, use application/json): " + json,
+                "IPC JSON INVALID (405 METHOD_NOT_ALLOWED: PUT /ipc, use POST): " + json,
+                "IPC JSON INVALID (405 METHOD_NOT_ALLOWED: GET /ipc, use POST): <empty body>"
+            }, shown.ToArray());
+            Assert.Empty(router.Incoming);
+        }
+
+        // The offset reported for a body that is not UTF-8 agrees with the strict decoder the server uses.
+        [Theory]
+        [InlineData("7B 7D", -1)]
+        [InlineData("D0 9F D1 80", -1)]                  // "Пр" in UTF-8
+        [InlineData("E4 B8 AD F0 9F 98 80", -1)]         // 3- and 4-byte sequences
+        [InlineData("7B CF F0 7D", 1)]                   // Windows-1251
+        [InlineData("41 C0 80", 1)]                      // overlong
+        [InlineData("41 E0 80 80", 1)]                   // overlong
+        [InlineData("41 ED A0 80", 1)]                   // UTF-16 surrogate
+        [InlineData("41 F4 90 80 80", 1)]                // above U+10FFFF
+        [InlineData("41 42 E4 B8", 2)]                   // truncated at the end
+        [InlineData("80", 0)]                            // lone continuation byte
+        [InlineData("41 F5 80 80 80", 1)]
+        public void InvalidUtf8Offset_MatchesStrictDecoder(string hex, int expected)
+        {
+            byte[] bytes = hex.Split(' ').Select(b => Convert.ToByte(b, 16)).ToArray();
+            Assert.Equal(expected, LocalHttpServer.FindInvalidUtf8(bytes));
+            bool strictOk = true;
+            try { new UTF8Encoding(false, true).GetString(bytes); }
+            catch (DecoderFallbackException) { strictOk = false; }
+            Assert.Equal(expected < 0, strictOk);
+        }
+
+        [Fact]
+        public async Task JsonView_BodyNotUtf8_IsShownWithInvalidByte()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            using (var server = JsonViewServer(router))
+            {
+                server.Start();
+                // "Привет" sent in Windows-1251 instead of UTF-8 - a typical legacy client mistake.
+                byte[] body = Encoding.ASCII.GetBytes("{\"id\":\"1\",\"text\":\"")
+                    .Concat(new byte[] { 0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2 })
+                    .Concat(Encoding.ASCII.GetBytes("\"}")).ToArray();
+                string raw = await SendIpcBytes(server, "application/json", body);
+                Assert.StartsWith("HTTP/1.1 400 Bad Request", raw);
+                Assert.Equal(new[]
+                {
+                    "IPC JSON INVALID (400 Bad Request: Request body must be UTF-8: invalid byte 0xCF at offset 18): " +
+                    "{\"id\":\"1\",\"text\":\"������\"}"
+                }, shown.ToArray());
+                Assert.Empty(router.Incoming);
+            }
+        }
+
+        [Fact]
+        public async Task JsonView_ServerLevelRejections_AreShownWithReason()
+        {
+            var router = new ApiRouter("AutoCAD", "2021");
+            var shown = new System.Collections.Concurrent.ConcurrentQueue<string>();
+            router.JsonView = shown.Enqueue;
+            using (var server = JsonViewServer(router))
+            {
+                server.Start();
+                Assert.StartsWith("HTTP/1.1 413 ", await HttpTestHelpers.SendRaw(server.Port, Encoding.ASCII.GetBytes(
+                    "POST /ipc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 2000000\r\n\r\n")));
+                Assert.StartsWith("HTTP/1.1 411 ", await HttpTestHelpers.SendRaw(server.Port, Encoding.ASCII.GetBytes(
+                    "POST /ipc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\r\n")));
+                Assert.StartsWith("HTTP/1.1 403 ", await HttpTestHelpers.SendRaw(server.Port, Encoding.ASCII.GetBytes(
+                    "POST /ipc HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")));
+                // Rejections of other paths are not IPC and are not shown.
+                Assert.StartsWith("HTTP/1.1 411 ", await HttpTestHelpers.SendRaw(server.Port, Encoding.ASCII.GetBytes(
+                    "POST /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")));
+                Assert.Equal(new[]
+                {
+                    "IPC JSON INVALID (413 Payload Too Large: Request body too large): <body not read>",
+                    "IPC JSON INVALID (411 Length Required: Content-Length required): <body not read>",
+                    "IPC JSON INVALID (403 Forbidden: Host not allowed): <body not read>"
+                }, shown.ToArray());
+                Assert.Empty(router.Incoming);
+            }
+        }
+
+        [Fact]
+        public async Task JsonView_FailingOutputOrObserver_DoesNotChangeResponse()
+        {
+            var router = new ApiRouter("AutoCAD", "2021") { JsonView = line => { throw new InvalidOperationException("output failed"); } };
+            using (var server = new LocalHttpServer(0, router.Handle, null)
+                   { RequestRejected = (request, response) => { throw new InvalidOperationException("observer failed"); } })
+            {
+                server.Start();
+                Assert.StartsWith("HTTP/1.1 400 Bad Request", await SendIpcBytes(server, "application/json", new byte[] { 0xFF }));
+            }
+            var headers = new System.Collections.Generic.Dictionary<string, string> { { "Content-Type", "application/json" } };
+            Assert.Equal(400, router.Handle(new HttpRequestInfo("POST", "/ipc", "HTTP/1.1", headers, "{")).StatusCode);
             Assert.Empty(router.Incoming);
         }
 

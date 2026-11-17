@@ -90,14 +90,17 @@ namespace AutoCADHttp
 					(settings.WidgetsDirectory != null &&
 					 System.IO.Directory.Exists(settings.WidgetsDirectory)));
                 var router = CreateRouter(settings.WidgetsDirectory);
-                // JSONView = 1: print every accepted /ipc JSON. Post only queues the text for Application.Idle,
+                // JSONView = 1: print every /ipc JSON, accepted ("IPC JSON: ...") and rejected with the reason
+                // ("IPC JSON INVALID (...): ..."). Post only queues the text for Application.Idle,
                 // so the HTTP thread neither touches the AutoCAD API nor waits for the output.
                 if (settings.JsonView)
-                    router.JsonView = json => CommandLineLog.Post("IPC JSON: " + json);
+                    router.JsonView = CommandLineLog.Post;
                 CommandLineLog.Write("JSONView: " + (settings.JsonView ? "1" : "0"));
                 var server = new LocalHttpServer(settings.Address, settings.Port, router.Handle, CommandLineLog.Post)
                 {
-                    Verbose = Environment.GetEnvironmentVariable("ACADHTTP_VERBOSE") == "1"
+                    Verbose = Environment.GetEnvironmentVariable("ACADHTTP_VERBOSE") == "1",
+                    // Requests the server rejects before routing (e.g. body not UTF-8) are shown by JSONView too.
+                    RequestRejected = router.ReportRejected
                 };
                 Server.Dispose();
                 Router = router;

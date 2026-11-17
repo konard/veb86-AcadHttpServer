@@ -29,8 +29,9 @@ namespace StandaloneHost
                 {
                     var router = new ApiRouter("AutoCAD", "2021", ipc.Incoming, widgets);
                     if (settings.JsonView)
-                        router.JsonView = json => log("IPC JSON: " + json);
-                    using (var server = new LocalHttpServer(settings.Address, port, router.Handle, log) { Verbose = true })
+                        router.JsonView = log;
+                    using (var server = new LocalHttpServer(settings.Address, port, router.Handle, log)
+                           { Verbose = true, RequestRejected = router.ReportRejected })
                     {
                         log("Start(): " + server.Start() + " " + server.BaseUrl + "ping");
                         log("second Start(): " + server.Start());

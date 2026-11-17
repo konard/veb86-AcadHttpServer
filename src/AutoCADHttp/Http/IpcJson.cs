@@ -17,13 +17,16 @@ namespace AutoCADHttp.Http
 
         public static IpcJson Parse(string json)
         {
-            if (string.IsNullOrWhiteSpace(json) || Encoding.UTF8.GetByteCount(json) > LocalHttpServer.MaxBodyBytes)
-                throw new FormatException("IPC JSON is empty or too large.");
+            if (string.IsNullOrWhiteSpace(json))
+                throw new FormatException("IPC JSON is empty.");
+            int bytes = Encoding.UTF8.GetByteCount(json);
+            if (bytes > LocalHttpServer.MaxBodyBytes)
+                throw new FormatException("IPC JSON is too large: " + bytes + " bytes, maximum " + LocalHttpServer.MaxBodyBytes + ".");
             var reader = new Reader(json);
             IpcJson value = reader.ReadValue(0);
             reader.Space();
             if (reader.Position != json.Length)
-                throw new FormatException("Trailing data after IPC JSON.");
+                throw reader.Unexpected("Trailing data after IPC JSON");
             return value;
         }
 
@@ -120,7 +123,7 @@ namespace AutoCADHttp.Http
                 {
                     char c = _json[Position++];
                     if (c == '"') return result.ToString();
-                    if (c < 0x20) throw Invalid();
+                    if (c < 0x20) { Position--; throw Invalid(); }
                     if (c != '\\') { result.Append(c); continue; }
                     if (Position >= _json.Length) throw Invalid();
                     switch (_json[Position++])
@@ -174,7 +177,30 @@ namespace AutoCADHttp.Http
                 }
             }
 
-            private FormatException Invalid() { return new FormatException("Invalid IPC JSON at character " + Position + "."); }
+            // Reports where and what: e.g. "Invalid IPC JSON at line 3, column 9 (offset 27): unexpected '}'."
+            private FormatException Invalid() { return Unexpected("Invalid IPC JSON"); }
+
+            public FormatException Unexpected(string problem)
+            {
+                int line = 1, column = 1;
+                for (int i = 0; i < Position && i < _json.Length; i++)
+                {
+                    if (_json[i] == '\n') { line++; column = 1; }
+                    else column++;
+                }
+                return new FormatException(problem + " at line " + line + ", column " + column + " (offset " + Position +
+                                           "): unexpected " + Describe() + ".");
+            }
+
+            private string Describe()
+            {
+                if (Position >= _json.Length)
+                    return "end of JSON";
+                char c = _json[Position];
+                if (char.IsControl(c) || char.IsWhiteSpace(c) || char.IsSurrogate(c) || c == '\uFEFF') // invisible: BOM, NBSP, ...
+                    return "character U+" + ((int)c).ToString("X4");
+                return "'" + c + "'";
+            }
         }
     }
 }

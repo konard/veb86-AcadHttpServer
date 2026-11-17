@@ -20,7 +20,7 @@ namespace AutoCADHttp.Http
         public static IpcMessage Parse(string json)
         {
             IpcJson root = IpcJson.Parse(json);
-            RequireType(root, "object");
+            RequireType(root, "object", "IPC message");
             var message = new IpcMessage
             {
                 Id = RequiredString(root, "id"),
@@ -43,15 +43,15 @@ namespace AutoCADHttp.Http
                         message.ResultJson = ObjectJson(root, "result");
                     else if (message.Status == "error")
                     {
-                        IpcJson error = Member(root, "error");
-                        RequireType(error, "object");
-                        message.ErrorCode = RequiredString(error, "code");
+                        IpcJson error = Member(root, "error", "error");
+                        RequireType(error, "object", "error");
+                        message.ErrorCode = RequiredString(error, "code", "error.code");
                     }
                     else
-                        throw new FormatException("Response status must be ok or error.");
+                        throw new FormatException("status must be \"ok\" or \"error\", not " + Quote(message.Status) + ".");
                     break;
                 default:
-                    throw new FormatException("IPC type must be command, response or event.");
+                    throw new FormatException("type must be \"command\", \"response\" or \"event\", not " + Quote(message.Type) + ".");
             }
             return message;
         }
@@ -90,33 +90,34 @@ namespace AutoCADHttp.Http
             return "\"" + HttpResponseInfo.JsonEscape(value) + "\"";
         }
 
-        private static IpcJson Member(IpcJson parent, string name)
+        // Messages name the offending field, so a rejected message (and its JSONView output) shows what to fix.
+        private static IpcJson Member(IpcJson parent, string name, string path)
         {
             IpcJson member;
             if (parent.Members == null || !parent.Members.TryGetValue(name, out member))
-                throw new FormatException("Expected " + name + " field.");
+                throw new FormatException("Missing required field \"" + path + "\".");
             return member;
         }
 
-        private static void RequireType(IpcJson element, string type)
+        private static void RequireType(IpcJson element, string type, string path)
         {
             if (element.Kind != type)
-                throw new FormatException("Expected JSON " + type + ".");
+                throw new FormatException(path + " must be a JSON " + type + ", not " + element.Kind + ".");
         }
 
-        private static string RequiredString(IpcJson parent, string name)
+        private static string RequiredString(IpcJson parent, string name, string path = null)
         {
-            IpcJson member = Member(parent, name);
-            RequireType(member, "string");
+            IpcJson member = Member(parent, name, path ?? name);
+            RequireType(member, "string", path ?? name);
             if (string.IsNullOrWhiteSpace(member.String))
-                throw new FormatException(name + " must not be empty.");
+                throw new FormatException((path ?? name) + " must not be empty.");
             return member.String;
         }
 
         private static string ObjectJson(IpcJson parent, string name)
         {
-            IpcJson member = Member(parent, name);
-            RequireType(member, "object");
+            IpcJson member = Member(parent, name, name);
+            RequireType(member, "object", name);
             return member.Raw;
         }
     }
